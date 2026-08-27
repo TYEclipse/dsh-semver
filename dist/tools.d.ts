@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-semver: three deterministic version tools exposed to
+ * Tool definitions for dsh-semver: six deterministic version tools exposed to
  * every agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. All outputs are lossless JSON — absent
  * fields are omitted or null, never undefined (the dsh-tools output gate).
@@ -12,6 +12,9 @@ export interface ToolSet {
     semver_parse: ToolDefinition;
     semver_compare: ToolDefinition;
     semver_satisfies: ToolDefinition;
+    semver_inc: ToolDefinition;
+    semver_diff: ToolDefinition;
+    semver_sort: ToolDefinition;
 }
 /** Build all three tool definitions from the resolved config. */
 export declare function buildSemverTools(config: ResolvedConfig): ToolSet;

@@ -1,10 +1,13 @@
 /**
  * dsh-semver — semantic versioning toolbox for DeepSeek Harness.
  *
- * Three deterministic tools, zero runtime dependencies (pure logic):
+ * Six deterministic tools, zero runtime dependencies (pure logic):
  *   semver_parse      — parse a version string into major/minor/patch/prerelease/build
  *   semver_compare    — compare two versions (lt / eq / gt) with a human verdict
  *   semver_satisfies  — check a version against an npm-style range (^ ~ >= <= > < = x-ranges, hyphen, ||, AND)
+ *   semver_inc        — increment a version (major/minor/patch/premajor/preminor/prepatch/prerelease, npm rules)
+ *   semver_diff       — release-type difference between two versions (npm semver.diff)
+ *   semver_sort       — sort a list of versions by precedence (asc/desc, build-metadata tie-break)
  *
  * Safety model: every tool is pure, read-only and offline — no network, no
  * filesystem access, no dynamic evaluation.

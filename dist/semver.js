@@ -1,10 +1,13 @@
 /**
  * dsh-semver — semantic versioning toolbox for DeepSeek Harness.
  *
- * Three deterministic tools, zero runtime dependencies (pure logic):
+ * Six deterministic tools, zero runtime dependencies (pure logic):
  *   semver_parse      — parse a version string into major/minor/patch/prerelease/build
  *   semver_compare    — compare two versions (lt / eq / gt) with a human verdict
  *   semver_satisfies  — check a version against an npm-style range (^ ~ >= <= > < = x-ranges, hyphen, ||, AND)
+ *   semver_inc        — increment a version (major/minor/premajor/... with prerelease identifier)
+ *   semver_diff       — release-type difference between two versions
+ *   semver_sort       — sort a list of versions by precedence (build-metadata tie-break)
  *
  * Semantics follow the Semantic Versioning 2.0.0 spec and npm's range behavior:
  * prerelease identifiers sort numerically before alphanumerically, build metadata
@@ -340,5 +343,218 @@ export function satisfiesRange(version, range, includePrerelease = false) {
 export function relationLabel(a, b) {
     const d = compareVersions(a, b);
     return d < 0 ? 'lt' : d > 0 ? 'gt' : 'eq';
+}
+/* ------------------------------------------------------------------ *
+ * v0.2.0 — increment / difference / sort (npm semver 7.x parity)      *
+ * ------------------------------------------------------------------ */
+/** Release types supported by semver_inc (npm semver.inc). */
+export const INC_RELEASES = ['major', 'minor', 'patch', 'premajor', 'preminor', 'prepatch', 'prerelease'];
+/** A single prerelease/build identifier (dot-separated body per npm's identifier validation). */
+const IDENTIFIER_RE = /^(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*$/;
+const NUMERIC_RE = /^\d+$/;
+/** Compare two identifiers, numeric before alphanumeric (npm compareIdentifiers). */
+export function compareIdentifiers(a, b) {
+    const aNum = NUMERIC_RE.test(a);
+    const bNum = NUMERIC_RE.test(b);
+    if (aNum && bNum) {
+        const an = Number(a);
+        const bn = Number(b);
+        return an === bn ? 0 : an < bn ? -1 : 1;
+    }
+    if (aNum !== bNum)
+        return aNum ? -1 : 1;
+    return a === b ? 0 : a < b ? -1 : 1;
+}
+/** Precedence comparison with build-metadata tie-break (npm compareBuild). */
+export function compareBuildVersions(a, b) {
+    const precedence = compareVersions(a, b);
+    if (precedence !== 0)
+        return precedence;
+    const ab = a.build;
+    const bb = b.build;
+    if (ab === null && bb === null)
+        return 0;
+    if (ab === null)
+        return -1;
+    if (bb === null)
+        return 1;
+    const len = Math.max(ab.length, bb.length);
+    for (let i = 0; i < len; i++) {
+        const x = ab[i];
+        const y = bb[i];
+        if (x === undefined && y === undefined)
+            return 0;
+        if (x === undefined)
+            return -1;
+        if (y === undefined)
+            return 1;
+        const d = compareIdentifiers(x, y);
+        if (d !== 0)
+            return d;
+    }
+    return 0;
+}
+/**
+ * Increment a version following npm semver.inc semantics (semver 7.x):
+ * - premajor/preminor/prepatch clear the prerelease and bump the component,
+ *   then attach [identifier.]0; prepatch always bumps patch.
+ * - prerelease acts like prepatch for plain releases, otherwise bumps the
+ *   last numeric prerelease identifier (or appends 0 when none is numeric).
+ * - major/minor/patch on a pre-major/pre-minor/pre-patch version release it
+ *   without incrementing ("1.0.0-5" + major → "1.0.0").
+ * - build metadata is dropped from the result (npm parity).
+ */
+export function incVersion(input, release, identifier) {
+    if (!INC_RELEASES.includes(release)) {
+        return { ok: false, reason: `invalid release type: "${release}" (expected one of ${INC_RELEASES.join('/')})` };
+    }
+    const id = identifier !== undefined && identifier !== '' ? identifier : undefined;
+    if (id !== undefined && release.startsWith('pre') && !IDENTIFIER_RE.test(id)) {
+        return { ok: false, reason: `invalid identifier: "${id}" (dot-separated [0-9A-Za-z-] tokens, no leading zeros)` };
+    }
+    const parsed = parseVersion(input);
+    if (!parsed.ok)
+        return parsed;
+    const v = parsed.value;
+    let major = v.major;
+    let minor = v.minor;
+    let patch = v.patch;
+    let pre = v.prerelease === null ? [] : [...v.prerelease];
+    const hasPre = pre.length > 0;
+    switch (release) {
+        case 'premajor':
+            pre = [];
+            patch = 0;
+            minor = 0;
+            major++;
+            pre = bumpPre(pre, id);
+            break;
+        case 'preminor':
+            pre = [];
+            patch = 0;
+            minor++;
+            pre = bumpPre(pre, id);
+            break;
+        case 'prepatch':
+            pre = []; // npm clears the prerelease first, so patch always increments
+            patch++;
+            pre = bumpPre(pre, id);
+            break;
+        case 'prerelease':
+            if (!hasPre)
+                patch++; // acts like prepatch when the input is a plain release
+            pre = bumpPre(pre, id);
+            break;
+        case 'major':
+            if (minor !== 0 || patch !== 0 || !hasPre)
+                major++;
+            minor = 0;
+            patch = 0;
+            pre = [];
+            break;
+        case 'minor':
+            if (patch !== 0 || !hasPre)
+                minor++;
+            patch = 0;
+            pre = [];
+            break;
+        case 'patch':
+            if (!hasPre)
+                patch++;
+            pre = [];
+            break;
+    }
+    const next = normalizeVersion({ major, minor, patch, prerelease: pre.length > 0 ? pre : null, build: null });
+    const from = normalizeVersion(v);
+    return { ok: true, value: { from, next, rule: `bump ${release}${id !== undefined ? ` (identifier ${id})` : ''}: ${from} → ${next}` } };
+}
+/** npm's internal "pre" increment (base identifier 0). */
+function bumpPre(pre, identifier) {
+    if (pre.length === 0) {
+        pre = ['0'];
+    }
+    else {
+        let bumped = false;
+        for (let i = pre.length - 1; i >= 0; i--) {
+            const token = pre[i] ?? '';
+            if (NUMERIC_RE.test(token)) {
+                pre[i] = String(Number(token) + 1);
+                bumped = true;
+                break;
+            }
+        }
+        if (!bumped)
+            pre.push('0');
+    }
+    if (identifier !== undefined) {
+        const candidate = [...identifier.split('.'), '0'];
+        if (compareIdentifiers(pre[0] ?? '', identifier) === 0) {
+            const second = pre[1];
+            if (second === undefined || Number.isNaN(Number(second))) {
+                pre = candidate;
+            }
+        }
+        else {
+            pre = candidate;
+        }
+    }
+    return pre;
+}
+/**
+ * Release-type difference between two versions (npm semver.diff semantics).
+ * Returns null when precedence is equal (build metadata ignored). npm special
+ * cases: prerelease → release of the same main version is patch (or minor when
+ * the low version is a pre-minor, or major when it is a pre-major), and a
+ * difference whose higher side is a prerelease gets the "pre" prefix.
+ */
+export function diffKind(a, b) {
+    const comparison = compareVersions(a, b);
+    if (comparison === 0)
+        return null;
+    const aHigher = comparison > 0;
+    const high = aHigher ? a : b;
+    const low = aHigher ? b : a;
+    const highHasPre = high.prerelease !== null && high.prerelease.length > 0;
+    const lowHasPre = low.prerelease !== null && low.prerelease.length > 0;
+    if (lowHasPre && !highHasPre) {
+        if (low.patch === 0 && low.minor === 0)
+            return 'major';
+        if (low.major === high.major && low.minor === high.minor && low.patch === high.patch) {
+            if (low.minor !== 0 && low.patch === 0)
+                return 'minor';
+            return 'patch';
+        }
+    }
+    const prefix = highHasPre ? 'pre' : '';
+    if (a.major !== b.major)
+        return (prefix + 'major');
+    if (a.minor !== b.minor)
+        return (prefix + 'minor');
+    if (a.patch !== b.patch)
+        return (prefix + 'patch');
+    return 'prerelease';
+}
+/**
+ * Sort version strings by precedence (npm semver.sort / rsort), using build
+ * metadata as tie-break (npm compareBuild). Invalid entries are skipped and
+ * reported with their input index; valid entries are still sorted.
+ */
+export function sortVersionStrings(inputs, order = 'asc') {
+    if (inputs.length === 0)
+        return { ok: true, value: { sorted: [], invalid: [] } };
+    const entries = [];
+    const invalid = [];
+    inputs.forEach((input, index) => {
+        const result = parseVersion(input);
+        if (!result.ok)
+            invalid.push({ index, input, reason: result.reason });
+        else
+            entries.push({ value: result.value, normalized: normalizeVersion(result.value) });
+    });
+    entries.sort((x, y) => {
+        const d = compareBuildVersions(x.value, y.value);
+        return order === 'desc' ? -d : d;
+    });
+    return { ok: true, value: { sorted: entries.map((e) => e.normalized), invalid } };
 }
 //# sourceMappingURL=semver.js.map

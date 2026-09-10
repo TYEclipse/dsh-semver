@@ -1,6 +1,6 @@
 {
   "name": "dsh-semver",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Semantic versioning toolbox for DeepSeek Harness (dsh): parse, compare, range-check, increment, diff and sort semver strings (npm semver.inc/diff/sort semantics) — zero runtime dependencies, pure logic",
   "type": "module",
   "main": "dist/index.js",

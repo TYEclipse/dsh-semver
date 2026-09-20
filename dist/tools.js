@@ -50,9 +50,11 @@ function renderIntersects(value) {
     const result = value;
     if (!result.valid)
         return `cannot compare "${result.range1}" with "${result.range2}": ${result.reason ?? 'unknown reason'}`;
-    return result.intersects === true
-        ? `"${result.range1}" and "${result.range2}" can both be satisfied`
-        : `"${result.range1}" and "${result.range2}" cannot both be satisfied`;
+    if (result.intersects !== true)
+        return `"${result.range1}" and "${result.range2}" cannot both be satisfied`;
+    // The witness is the actionable half of the answer, so the rendered text carries it too
+    // (the structured output has it, but the renderer is all the model sees).
+    return `"${result.range1}" and "${result.range2}" can both be satisfied${result.witness === undefined ? '' : ` — e.g. ${result.witness}`}`;
 }
 function renderSort(value) {
     const result = value;

@@ -227,6 +227,12 @@ describe('semver_intersects tool', () => {
     const witness = out.witness ?? ''
     expect((await tools.semver_satisfies.execute({ version: witness, range: '^1.2.3' })).satisfied).toBe(true)
     expect((await tools.semver_satisfies.execute({ version: witness, range: '^1.3.0' })).satisfied).toBe(true)
+    // The rendered text is all the model sees — it must carry the witness too (found in the
+    // v0.3.0 headless e2e: the structured field had it, the rendered line did not).
+    const render = tools.semver_intersects.output.render as unknown as
+      (args: Record<string, never> | { range1: string; range2: string }, value: unknown) => { text?: string }[]
+    const rendered = render({ range1: '^1.2.3', range2: '^1.3.0' }, out)[0]?.text ?? ''
+    expect(rendered).toContain(witness)
     assertNoUndefined(out)
   })
 

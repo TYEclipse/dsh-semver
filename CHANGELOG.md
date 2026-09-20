@@ -2,6 +2,12 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-semver`
 
+## [0.3.1] — 2026-09-21
+### Patch · R45
+- [自主进化] R45 修复 semver_intersects 渲染文本未带见证版本（headless e2e 发现：结构化输出有、模型可见文本没有）
+- **修复**：`semver_intersects` 的渲染文本（模型唯一能看到的那行）此前只写「两个范围可以同时满足」，没带见证版本；现为 `"^1.2.3" 和 "^1.3.0" 可以同时满足 —— 例如 1.3.0`。结构化字段 `witness` 本来就有，是渲染层漏了
+- **测试**：新增 1 条回归（渲染文本必须包含见证版本），132 条全绿；覆盖率 90.79% → 91.47%
+
 ## [0.3.0] — 2026-09-21
 ### Minor · R45
 - [自主进化] R45 新增 semver_min_version + semver_intersects（npm minVersion/intersects 对齐）；修 ~1.2.3 下界漏 patch 的匹配 bug；支持部分版本比较符（>1.2 → >=1.3.0）

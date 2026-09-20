@@ -73,11 +73,12 @@ function renderMinVersion(value: unknown): string {
 }
 
 function renderIntersects(value: unknown): string {
-  const result = value as { valid: boolean; range1: string; range2: string; intersects?: boolean; reason?: string }
+  const result = value as { valid: boolean; range1: string; range2: string; intersects?: boolean; witness?: string; reason?: string }
   if (!result.valid) return `cannot compare "${result.range1}" with "${result.range2}": ${result.reason ?? 'unknown reason'}`
-  return result.intersects === true
-    ? `"${result.range1}" and "${result.range2}" can both be satisfied`
-    : `"${result.range1}" and "${result.range2}" cannot both be satisfied`
+  if (result.intersects !== true) return `"${result.range1}" and "${result.range2}" cannot both be satisfied`
+  // The witness is the actionable half of the answer, so the rendered text carries it too
+  // (the structured output has it, but the renderer is all the model sees).
+  return `"${result.range1}" and "${result.range2}" can both be satisfied${result.witness === undefined ? '' : ` — e.g. ${result.witness}`}`
 }
 
 function renderSort(value: unknown): string {

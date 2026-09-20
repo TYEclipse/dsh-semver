@@ -12,8 +12,10 @@ import {
   diffKind,
   incVersion,
   INC_RELEASES,
+  minVersionOfRange,
   normalizeVersion,
   parseVersion,
+  rangesIntersect,
   relationLabel,
   satisfiesRange,
   sortVersionStrings,
@@ -28,6 +30,8 @@ export interface ToolSet {
   semver_inc: ToolDefinition
   semver_diff: ToolDefinition
   semver_sort: ToolDefinition
+  semver_min_version: ToolDefinition
+  semver_intersects: ToolDefinition
 }
 
 function renderParse(value: unknown): string {
@@ -60,6 +64,20 @@ function renderDiff(value: unknown): string {
   const result = value as { valid: boolean; left: string; right: string; equal?: boolean; difference?: string; explanation?: string; reason?: string }
   if (!result.valid) return `cannot diff "${result.left}" vs "${result.right}": ${result.reason ?? 'unknown reason'}`
   return result.explanation ?? ''
+}
+
+function renderMinVersion(value: unknown): string {
+  const result = value as { valid: boolean; range: string; satisfiable?: boolean; min?: string; normalized?: string; reason?: string }
+  if (!result.valid) return `cannot find a minimum for "${result.range}": ${result.reason ?? 'unknown reason'}`
+  return result.satisfiable === false ? result.normalized ?? '' : `lowest version in "${result.range}" is ${result.min ?? ''}`
+}
+
+function renderIntersects(value: unknown): string {
+  const result = value as { valid: boolean; range1: string; range2: string; intersects?: boolean; reason?: string }
+  if (!result.valid) return `cannot compare "${result.range1}" with "${result.range2}": ${result.reason ?? 'unknown reason'}`
+  return result.intersects === true
+    ? `"${result.range1}" and "${result.range2}" can both be satisfied`
+    : `"${result.range1}" and "${result.range2}" cannot both be satisfied`
 }
 
 function renderSort(value: unknown): string {
@@ -363,5 +381,92 @@ export function buildSemverTools(config: ResolvedConfig): ToolSet {
     },
   })
 
-  return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort }
+  const semver_min_version = defineTool({
+    name: 'semver_min_version',
+    description: 'Report the lowest version that satisfies an npm-style range (npm semver.minVersion parity). Answers "what is the oldest thing this range accepts?" for any range form this toolbox parses — exact, comparisons, caret, tilde, wildcards, hyphen ranges, AND / OR. Unsatisfiable combinations report satisfiable=false instead of a plausible-looking bound (e.g. "^0.1.4 ~3.0.2", ">2.0.0 <2.0.1"), and a range with no lower bound reports the floor (0.0.0, or 0.0.0-0 when only prereleases of 0.0.0 would match). Deterministic, read-only, no network.',
+    parameters: {
+      range: { type: 'string', required: true, description: 'Range expression, e.g. "^1.2.3", ">=1.2.0 <2.0.0", "1.2.3 - 2.3.4".' },
+      includePrerelease: { type: 'boolean', description: `Also consider prerelease versions when the range itself has no prerelease (default ${config.includePrerelease}).` },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          range: { type: 'string', required: true },
+          satisfiable: { type: 'boolean', required: true },
+          min: { type: 'string' },
+          normalized: { type: 'string' },
+          explanation: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { range: string }, value: unknown) => [{ type: 'text', text: renderMinVersion(value) }],
+    },
+    async execute(args: { range: string; includePrerelease?: boolean }) {
+      const result = minVersionOfRange(args.range, args.includePrerelease ?? config.includePrerelease)
+      if (!result.ok) return { valid: false, range: args.range, satisfiable: false, reason: result.reason }
+      const min = result.value.min
+      const out: { valid: boolean; range: string; satisfiable: boolean; min?: string; normalized: string; explanation: string } = {
+        valid: true,
+        range: args.range,
+        satisfiable: min !== null,
+        normalized: result.value.normalized,
+        explanation: min === null
+          ? `no version satisfies "${args.range}" (normalized: ${result.value.normalized})`
+          : `lowest version satisfying "${args.range}" is ${min} (normalized: ${result.value.normalized})`,
+      }
+      if (min !== null) out.min = min
+      return out
+    },
+  })
+
+  const semver_intersects = defineTool({
+    name: 'semver_intersects',
+    description: 'Check whether two npm-style ranges can be satisfied by at least one version (npm semver.intersects parity) — the "can these two dependencies ever agree?" question. Handles alternations, unsatisfiable sets and the npm boundary special cases; when the ranges do overlap, a best-effort witness version that satisfies BOTH ranges is returned (verified against both ranges before it is reported, so it is never wrong — it can only be absent). Deterministic, read-only, no network.',
+    parameters: {
+      range1: { type: 'string', required: true, description: 'First range, e.g. "^1.2.3".' },
+      range2: { type: 'string', required: true, description: 'Second range, e.g. ">=1.3.0 <1.5.0".' },
+      includePrerelease: { type: 'boolean', description: `Use prerelease semantics while comparing (default ${config.includePrerelease}).` },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          range1: { type: 'string', required: true },
+          range2: { type: 'string', required: true },
+          intersects: { type: 'boolean', required: true },
+          witness: { type: 'string' },
+          normalized1: { type: 'string' },
+          normalized2: { type: 'string' },
+          explanation: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { range1: string; range2: string }, value: unknown) => [{ type: 'text', text: renderIntersects(value) }],
+    },
+    async execute(args: { range1: string; range2: string; includePrerelease?: boolean }) {
+      const result = rangesIntersect(args.range1, args.range2, args.includePrerelease ?? config.includePrerelease)
+      if (!result.ok) return { valid: false, range1: args.range1, range2: args.range2, intersects: false, reason: result.reason }
+      const value = result.value
+      const out: { valid: boolean; range1: string; range2: string; intersects: boolean; witness?: string; normalized1: string; normalized2: string; explanation: string } = {
+        valid: true,
+        range1: args.range1,
+        range2: args.range2,
+        intersects: value.intersects,
+        normalized1: value.normalized1,
+        normalized2: value.normalized2,
+        explanation: value.intersects
+          ? `"${args.range1}" and "${args.range2}" overlap${value.witness === null ? '' : ` — e.g. ${value.witness} satisfies both`}`
+          : `"${args.range1}" and "${args.range2}" do not overlap`,
+      }
+      if (value.witness !== null) out.witness = value.witness
+      return out
+    },
+  })
+
+  return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects }
 }

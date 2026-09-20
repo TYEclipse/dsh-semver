@@ -1,6 +1,6 @@
 # dsh-semver
 
-> Semantic versioning toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — parse, compare, range-check, increment, diff and sort semver strings. Zero runtime dependencies, pure logic, fully deterministic.
+> Semantic versioning toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — parse, compare, range-check, increment, diff, sort, find a range's lowest version and check whether two ranges overlap. Zero runtime dependencies, pure logic, fully deterministic.
 
 Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11`?", "does `1.2.4-beta.1` satisfy `^1.2.3`?" and "what does `1.2.4-beta.0` + prerelease become?" are exactly the questions LLMs get wrong — prerelease ordering, tuple-lock, caret/tilde upper bounds and prerelease bump rules are easy to misremember. This plugin turns those questions into deterministic tool calls.
 
@@ -14,6 +14,29 @@ Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11
 | `semver_inc` | Increment a version following npm `semver.inc` rules: `major` / `minor` / `patch` / `premajor` / `preminor` / `prepatch` / `prerelease`, with an optional prerelease `identifier` |
 | `semver_diff` | Release-type difference between two versions (npm `semver.diff`): `major` / `minor` / `patch` / `premajor` / `preminor` / `prepatch` / `prerelease` |
 | `semver_sort` | Sort a list of versions by precedence, ascending or descending, with build metadata as tie-break (npm `semver.sort` / `rsort`) |
+| `semver_min_version` | Lowest version a range accepts (npm `semver.minVersion`): `~1.2.3` → `1.2.3`, `>1.2` → `1.3.0`, `<=1.2.3` → `0.0.0`; unsatisfiable combinations report `satisfiable: false` instead of a plausible-looking bound |
+| `semver_intersects` | Whether two ranges can be satisfied by one version (npm `semver.intersects`) — plus a witness version that satisfies both when they overlap |
+
+### semver_min_version / semver_intersects — range algebra (v0.3.0)
+
+Two questions that come up whenever an agent has to negotiate versions:
+
+```
+semver_min_version("^1.2.3")            → 1.2.3
+semver_min_version(">1.2.3")            → 1.2.4      (> bound with no prerelease bumps patch)
+semver_min_version(">1.2")              → 1.3.0      (partial versions follow npm's x-range rule)
+semver_min_version("~1.2.3")            → 1.2.3
+semver_min_version("<=1.2.3")           → 0.0.0      (no lower bound → the floor)
+semver_min_version(">2.0.0 <2.0.1")     → satisfiable: false   (never a guessed bound)
+
+semver_intersects("^1.2.3", "^1.3.0")   → true, witness 1.3.0
+semver_intersects("^1.0.0", "^2.0.0")   → false
+semver_intersects("^1.0.0 || ^2.0.0", "^2.5.0") → true
+```
+
+- **`satisfiable: false` is a result, not an error.** Unsatisfiable combinations (`^0.1.4 ~3.0.2`, `>=1.0.0 <1.0.0`, `>2.0.0 <2.0.1`) report that no version fits, rather than returning a boundary that looks reasonable but matches nothing.
+- **The witness is verified, never guessed.** When two ranges overlap, `semver_intersects` probes the ranges' boundary versions and checks each candidate against **both** ranges before reporting it — so a reported witness always satisfies both, though it is not claimed to be the lowest one.
+- **npm parity is enforced against npm itself.** `npm semver` renders `~1.2.3` as `>=1.2.3 <1.3.0`; a hand-written expectation would have missed that `1.2.0` used to be accepted. See *Testing* below.
 
 ### semver_inc — npm increment semantics (v0.2.0)
 
@@ -29,9 +52,9 @@ Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11
 ### Supported range syntax (npm-compatible subset)
 
 - **Exact**: `1.2.3`, `=1.2.3`
-- **Comparisons**: `>1.2.0`, `>=1.2.0`, `<2.0.0`, `<=2.0.0`
+- **Comparisons**: `>1.2.0`, `>=1.2.0`, `<2.0.0`, `<=2.0.0` — partial versions follow npm's x-range rewrite (`>1.2` → `>=1.3.0`, `<=1.2` → `<1.3.0`, `<1.2` → `<1.2.0`, `>=1.2` → `>=1.2.0`; npm compiles `>*` / `<*` to a range nothing satisfies)
 - **Caret**: `^1.2.3` → `>=1.2.3 <2.0.0`, with the 0.x rules (`^0.2.3` → `>=0.2.3 <0.3.0`, `^0.0.3` → `>=0.0.3 <0.0.4`)
-- **Tilde**: `~1.2.3` → `>=1.2.3 <1.3.0`, `~1.2` → `>=1.2.0 <1.3.0`, `~1` → `>=1.0.0 <2.0.0`
+- **Tilde**: `~1.2.3` → `>=1.2.3 <1.3.0`, `~1.2` → `>=1.2.0 <1.3.0`, `~1` → `>=1.0.0 <2.0.0` (fixed in v0.3.0 — the patch component used to be dropped from the lower bound, so `1.2.0` wrongly matched `~1.2.3`)
 - **Wildcards**: `1.2.x`, `1.x`, `*` (bare partials `1.2` / `1` behave the same)
 - **Hyphen ranges**: `1.2.3 - 2.3.4` (inclusive endpoints; partial upper endpoints like `1.2.3 - 2.3` → `<2.4.0`)
 - **AND / OR**: `>=1.2.0 <2.0.0`, `^1.2.3 || >=3.0.0`
@@ -78,18 +101,39 @@ semver_diff("1.2.3", "2.0.0-beta.1")
 
 semver_sort(["1.2.3", "1.2.10", "1.0.0"], "desc")
   → ["1.2.10", "1.2.3", "1.0.0"]
+
+semver_min_version(">=1.2.0 <2.0.0")
+  → 1.2.0
+
+semver_intersects("^1.2.3", ">=1.3.0 <1.5.0")
+  → true — e.g. 1.3.0 satisfies both
 ```
 
 ## Safety
 
-All six tools are **pure and offline**: no network, no filesystem access, no shell, no dynamic evaluation. Inputs are validated with strict regexes and numeric checks; malformed versions, ranges and identifiers return explicit reasons instead of throwing.
+All eight tools are **pure and offline**: no network, no filesystem access, no shell, no dynamic evaluation. Inputs are validated with strict regexes and numeric checks; malformed versions, ranges and identifiers return explicit reasons instead of throwing.
+
+## Testing
+
+```sh
+pnpm test           # vitest — 132 tests
+```
+
+Tool semantics are anchored to **npm's own semver package** as an independent oracle, never to hand-written expectations:
+
+```
+test/oracle/range-algebra-oracle.mjs   # regenerates the anchors from npm semver
+test/anchors/range-algebra.json        # 54 ranges · 400 range pairs · 864 matcher cases
+```
+
+With `npm i semver@7` available, `node test/oracle/range-algebra-oracle.mjs` rewrites the anchors; the test suite sweeps the plugin's matcher, `semver_min_version` and `semver_intersects` against every one of them. The `~1.2.3` lower-bound bug fixed in v0.3.0 was found exactly this way — its v0.2.x expectation had been chosen by hand and sat outside the wrong bound.
 
 ## Development
 
 ```sh
 pnpm install        # dev dependencies only (esbuild allowBuilds is pre-configured)
 pnpm build          # tsc → dist/ (committed; git installs do not run build scripts)
-pnpm test           # vitest — 114 tests; anchors generated by npm semver 7.7.4 (independent oracle)
+pnpm test           # vitest — 132 tests; anchors generated by npm semver 7.8.5 (independent oracle)
 pnpm lint           # oxlint (src + test only)
 ```
 

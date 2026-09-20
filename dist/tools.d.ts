@@ -15,6 +15,8 @@ export interface ToolSet {
     semver_inc: ToolDefinition;
     semver_diff: ToolDefinition;
     semver_sort: ToolDefinition;
+    semver_min_version: ToolDefinition;
+    semver_intersects: ToolDefinition;
 }
 /** Build all three tool definitions from the resolved config. */
 export declare function buildSemverTools(config: ResolvedConfig): ToolSet;

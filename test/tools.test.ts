@@ -66,9 +66,17 @@ describe('semver_satisfies tool', () => {
   })
 
   it('reports invalid ranges', async () => {
-    const out = await tools.semver_satisfies.execute({ version: '1.2.3', range: '>=1.x' })
+    const out = await tools.semver_satisfies.execute({ version: '1.2.3', range: 'not-a-range' })
     expect(out.valid).toBe(false)
     expect(typeof out.reason).toBe('string')
+  })
+
+  it('accepts npm partial-version comparators (">1.2" means ">=1.3.0")', async () => {
+    const out = await tools.semver_satisfies.execute({ version: '1.2.9', range: '>1.2' })
+    expect(out.valid).toBe(true)
+    expect(out.satisfied).toBe(false)
+    const inside = await tools.semver_satisfies.execute({ version: '1.3.0', range: '>1.2' })
+    expect(inside.satisfied).toBe(true)
   })
 })
 
@@ -173,5 +181,74 @@ describe('semver_sort tool', () => {
     await expect(
       tools.semver_sort.execute({ versions: ['1.0.0'], order: 'sideways' } as { versions: string[]; order?: string }),
     ).rejects.toThrow()
+  })
+})
+
+describe('semver_min_version tool', () => {
+  it('reports the lowest satisfying version (npm anchor)', async () => {
+    const out = await tools.semver_min_version.execute({ range: '^1.2.3' })
+    expect(out.valid).toBe(true)
+    expect(out.satisfiable).toBe(true)
+    expect(out.min).toBe('1.2.3')
+    expect(out.explanation).toContain('1.2.3')
+    assertNoUndefined(out)
+  })
+
+  it('applies the npm ">" rule and the partial-range rewrite (npm anchors)', async () => {
+    expect((await tools.semver_min_version.execute({ range: '>1.2.3' })).min).toBe('1.2.4')
+    expect((await tools.semver_min_version.execute({ range: '>1.2' })).min).toBe('1.3.0')
+    expect((await tools.semver_min_version.execute({ range: '~1.2.3' })).min).toBe('1.2.3')
+    expect((await tools.semver_min_version.execute({ range: '<=1.2.3' })).min).toBe('0.0.0')
+  })
+
+  it('flags unsatisfiable ranges without a min key', async () => {
+    const out = await tools.semver_min_version.execute({ range: '>2.0.0 <2.0.1' })
+    expect(out.valid).toBe(true)
+    expect(out.satisfiable).toBe(false)
+    expect('min' in out).toBe(false)
+    expect(out.explanation).toContain('no version satisfies')
+    assertNoUndefined(out)
+  })
+
+  it('reports invalid ranges', async () => {
+    const out = await tools.semver_min_version.execute({ range: '' })
+    expect(out.valid).toBe(false)
+    expect(out.reason?.length).toBeGreaterThan(0)
+    assertNoUndefined(out)
+  })
+})
+
+describe('semver_intersects tool', () => {
+  it('detects overlapping ranges and returns a verified witness (npm anchor)', async () => {
+    const out = await tools.semver_intersects.execute({ range1: '^1.2.3', range2: '^1.3.0' })
+    expect(out.valid).toBe(true)
+    expect(out.intersects).toBe(true)
+    expect(out.witness).toBeTypeOf('string')
+    const witness = out.witness ?? ''
+    expect((await tools.semver_satisfies.execute({ version: witness, range: '^1.2.3' })).satisfied).toBe(true)
+    expect((await tools.semver_satisfies.execute({ version: witness, range: '^1.3.0' })).satisfied).toBe(true)
+    assertNoUndefined(out)
+  })
+
+  it('detects disjoint ranges and omits the witness (npm anchor)', async () => {
+    const out = await tools.semver_intersects.execute({ range1: '^1.0.0', range2: '^2.0.0' })
+    expect(out.intersects).toBe(false)
+    expect('witness' in out).toBe(false)
+    expect(out.explanation).toContain('do not overlap')
+    assertNoUndefined(out)
+  })
+
+  it('handles alternations and unsatisfiable sets (npm anchors)', async () => {
+    expect((await tools.semver_intersects.execute({ range1: '^1.0.0 || ^2.0.0', range2: '^2.5.0' })).intersects).toBe(true)
+    expect((await tools.semver_intersects.execute({ range1: '^1.0.0 || ^3.0.0', range2: '^2.0.0' })).intersects).toBe(false)
+    expect((await tools.semver_intersects.execute({ range1: '>=1.0.0 <1.0.0', range2: '*' })).intersects).toBe(false)
+  })
+
+  it('reports invalid ranges', async () => {
+    const out = await tools.semver_intersects.execute({ range1: '^1.2.3', range2: 'not-a-range' })
+    expect(out.valid).toBe(false)
+    expect(out.intersects).toBe(false)
+    expect(out.reason?.length).toBeGreaterThan(0)
+    assertNoUndefined(out)
   })
 })

@@ -201,10 +201,36 @@ function parseToken(token) {
         return { ok: true, comparators: [upperInc(v), lower(v)] };
     }
     if (op === '>=' || op === '<=' || op === '>' || op === '<') {
-        if (isX(rawMajor) || isX(rawMinor) || isX(rawPatch)) {
-            return { ok: false, reason: `invalid range: "${op}" cannot be combined with wildcard versions` };
+        // Partial versions combined with a comparison operator follow npm's x-range
+        // rewrite: ">1.2" → ">=1.3.0", "<=1.2" → "<1.3.0", "<1.2" → "<1.2.0",
+        // ">=1.2" → ">=1.2.0" (and the same one level deeper for "1.2.x").
+        if (isX(rawMajor)) {
+            // ">*" / "<*" / ">x": npm compiles these to "<0.0.0-0", which nothing satisfies.
+            if (op === '>' || op === '<')
+                return { ok: true, comparators: [upper(makeVersion(0, 0, 0, '0'))] };
+            return { ok: true, comparators: [] }; // ">=*" / "<=*" match everything
         }
-        const v = makeVersion(Number(rawMajor), Number(rawMinor), Number(rawPatch), preRaw);
+        const major = Number(rawMajor);
+        if (isX(rawMinor)) {
+            if (op === '>')
+                return { ok: true, comparators: [lower(makeVersion(major + 1, 0, 0, null))] };
+            if (op === '<=')
+                return { ok: true, comparators: [upper(makeVersion(major + 1, 0, 0, null))] };
+            if (op === '>=')
+                return { ok: true, comparators: [lower(makeVersion(major, 0, 0, null))] };
+            return { ok: true, comparators: [upper(makeVersion(major, 0, 0, null))] };
+        }
+        const minor = Number(rawMinor);
+        if (isX(rawPatch)) {
+            if (op === '>')
+                return { ok: true, comparators: [lower(makeVersion(major, minor + 1, 0, null))] };
+            if (op === '<=')
+                return { ok: true, comparators: [upper(makeVersion(major, minor + 1, 0, null))] };
+            if (op === '>=')
+                return { ok: true, comparators: [lower(makeVersion(major, minor, 0, null))] };
+            return { ok: true, comparators: [upper(makeVersion(major, minor, 0, null))] };
+        }
+        const v = makeVersion(major, minor, Number(rawPatch), preRaw);
         return { ok: true, comparators: [{ op, version: v }] };
     }
     if (op === '^') {
@@ -239,7 +265,11 @@ function parseToken(token) {
         return { ok: true, comparators: [] };
     const major = Number(rawMajor);
     const minor = isX(rawMinor) ? undefined : Number(rawMinor);
-    const base = makeVersion(major, minor ?? 0, 0, preRaw);
+    const patch = isX(rawPatch) ? undefined : Number(rawPatch);
+    // npm: "~1.2.3" → >=1.2.3 <1.3.0; a missing patch only fills in for the lower bound
+    // ("~1.2" → >=1.2.0 <1.3.0). Dropping a specified patch here would silently widen the
+    // range (the v0.3.0 oracle sweep caught exactly that: ~1.2.3 used to match 1.2.0).
+    const base = makeVersion(major, minor ?? 0, patch ?? 0, preRaw);
     const upperBound = minor !== undefined ? makeVersion(major, minor + 1, 0, null) : makeVersion(major + 1, 0, 0, null);
     return { ok: true, comparators: [lower(base), upper(upperBound)] };
 }
@@ -343,6 +373,183 @@ export function satisfiesRange(version, range, includePrerelease = false) {
 export function relationLabel(a, b) {
     const d = compareVersions(a, b);
     return d < 0 ? 'lt' : d > 0 ? 'gt' : 'eq';
+}
+/* ------------------------------------------------------------------ *
+ * v0.3.0 — range algebra: minimum version / range intersection        *
+ * ------------------------------------------------------------------ */
+/** Parse a range into its alternatives (each an AND-set of comparators). */
+function parseRangeSets(range) {
+    const trimmed = range.trim();
+    if (trimmed === '')
+        return { ok: false, reason: 'invalid range: empty string' };
+    const sets = [];
+    for (const alt of trimmed.split('||')) {
+        const expanded = expandAlternative(alt);
+        if (!expanded.ok)
+            return expanded;
+        sets.push(expanded.comparators);
+    }
+    return { ok: true, sets };
+}
+/**
+ * Lowest version that satisfies a range (npm semver.minVersion parity).
+ *
+ * npm algorithm, ported exactly: if 0.0.0 satisfies the range it is the answer,
+ * then 0.0.0-0, then per alternative set the highest lower bound (a ">" bound
+ * with no prerelease becomes patch+1, a prerelease bound gets ".0" appended) and
+ * the smallest of those across alternatives. The candidate is only returned when
+ * it actually satisfies the range, otherwise null — so unsatisfiable ranges
+ * ("^0.1.4 ~3.0.2", ">2.0.0 <2.0.1") report null instead of a plausible-looking
+ * bound.
+ */
+export function minVersionOfRange(range, includePrerelease = false) {
+    const parsed = parseRangeSets(range);
+    if (!parsed.ok)
+        return parsed;
+    const normalized = parsed.sets.map((set) => renderComparators(set)).join(' || ');
+    const satisfies = (v) => {
+        const result = satisfiesRange(v, range, includePrerelease);
+        return result.ok && result.satisfied;
+    };
+    const zero = makeVersion(0, 0, 0, null);
+    if (satisfies(zero))
+        return { ok: true, value: { min: '0.0.0', normalized } };
+    const zeroPre = makeVersion(0, 0, 0, '0');
+    if (satisfies(zeroPre))
+        return { ok: true, value: { min: '0.0.0-0', normalized } };
+    let best = null;
+    for (const comparators of parsed.sets) {
+        let setMin = null;
+        for (const comparator of comparators) {
+            let candidate = null;
+            if (comparator.op === '>') {
+                // npm: a ">" bound with no prerelease bumps patch, a prerelease bound gains a ".0".
+                const pre = comparator.version.prerelease;
+                candidate = {
+                    major: comparator.version.major,
+                    minor: comparator.version.minor,
+                    patch: pre === null || pre.length === 0 ? comparator.version.patch + 1 : comparator.version.patch,
+                    prerelease: pre === null ? null : [...pre, '0'],
+                    build: null,
+                };
+            }
+            else if (comparator.op === '>=') {
+                candidate = comparator.version;
+            }
+            if (candidate !== null && (setMin === null || compareVersions(candidate, setMin) > 0))
+                setMin = candidate;
+        }
+        if (setMin !== null && (best === null || compareVersions(best, setMin) > 0))
+            best = setMin;
+    }
+    if (best !== null && satisfies(best))
+        return { ok: true, value: { min: normalizeVersion(best), normalized } };
+    return { ok: true, value: { min: null, normalized } };
+}
+/** The comparator rendered the way npm writes it (e.g. ">=1.2.3"), for boundary special cases. */
+function comparatorText(c) {
+    return `${c.op}${normalizeVersion(c.version)}`;
+}
+/**
+ * npm's Comparator.intersects — the pairwise rule Range.intersects is built on.
+ * Exact comparators never appear here (this parser rewrites "1.2.3" into
+ * ">=1.2.3 <=1.2.3"), so npm's empty-operator branch has no counterpart; an
+ * empty AND-set (a bare wildcard) intersects with everything.
+ */
+function comparatorIntersects(a, b, includePrerelease) {
+    const av = comparatorText(a);
+    const bv = comparatorText(b);
+    if (includePrerelease && (av === '<0.0.0-0' || bv === '<0.0.0-0'))
+        return false;
+    if (!includePrerelease && (av.startsWith('<0.0.0') || bv.startsWith('<0.0.0')))
+        return false;
+    if (a.op.startsWith('>') && b.op.startsWith('>'))
+        return true;
+    if (a.op.startsWith('<') && b.op.startsWith('<'))
+        return true;
+    const order = compareVersions(a.version, b.version);
+    if (order === 0 && a.op.includes('=') && b.op.includes('='))
+        return true;
+    if (order < 0 && a.op.startsWith('>') && b.op.startsWith('<'))
+        return true;
+    if (order > 0 && a.op.startsWith('<') && b.op.startsWith('>'))
+        return true;
+    return false;
+}
+/** Every comparator of one AND-set intersects every comparator of the other (npm isSatisfiable + every/every). */
+function setsIntersect(a, b, includePrerelease) {
+    return a.every((x) => b.every((y) => comparatorIntersects(x, y, includePrerelease)));
+}
+/** npm's isSatisfiable: pairwise-intersect a set with itself. An empty set is satisfiable (wildcard). */
+function isSatisfiableSet(set, includePrerelease) {
+    const remaining = [...set];
+    let test = remaining.pop();
+    let result = true;
+    while (result && remaining.length > 0 && test !== undefined) {
+        const current = test;
+        result = remaining.every((other) => comparatorIntersects(current, other, includePrerelease));
+        test = remaining.pop();
+    }
+    return result;
+}
+/**
+ * Whether any version satisfies both ranges (npm semver.intersects parity):
+ * alternative sets are compared pairwise, and a pair only counts when both sets
+ * are individually satisfiable.
+ *
+ * `witness` is best-effort, not minimal: boundary versions of the two ranges are
+ * probed and each candidate is verified against BOTH ranges with this plugin's
+ * own range matcher before it is reported (so a witness is never wrong, it can
+ * only be absent).
+ */
+export function rangesIntersect(range1, range2, includePrerelease = false) {
+    const first = parseRangeSets(range1);
+    if (!first.ok)
+        return first;
+    const second = parseRangeSets(range2);
+    if (!second.ok)
+        return second;
+    const normalized1 = first.sets.map((set) => renderComparators(set)).join(' || ');
+    const normalized2 = second.sets.map((set) => renderComparators(set)).join(' || ');
+    const intersects = first.sets.some((a) => isSatisfiableSet(a, includePrerelease) && second.sets.some((b) => isSatisfiableSet(b, includePrerelease) && setsIntersect(a, b, includePrerelease)));
+    if (!intersects)
+        return { ok: true, value: { intersects: false, normalized1, normalized2, witness: null } };
+    const candidates = [];
+    const push = (v) => {
+        if (!candidates.some((c) => compareBuildVersions(c, v) === 0))
+            candidates.push(v);
+    };
+    push(makeVersion(0, 0, 0, null));
+    for (const sets of [first.sets, second.sets]) {
+        for (const set of sets) {
+            for (const comparator of set) {
+                push(comparator.version);
+                push({ ...comparator.version, patch: comparator.version.patch + 1 });
+            }
+        }
+    }
+    const min1 = minVersionOfRange(range1, includePrerelease);
+    if (min1.ok && min1.value.min !== null) {
+        const parsedMin = parseVersion(min1.value.min);
+        if (parsedMin.ok)
+            push(parsedMin.value);
+    }
+    const min2 = minVersionOfRange(range2, includePrerelease);
+    if (min2.ok && min2.value.min !== null) {
+        const parsedMin = parseVersion(min2.value.min);
+        if (parsedMin.ok)
+            push(parsedMin.value);
+    }
+    let witness = null;
+    for (const candidate of candidates) {
+        const inFirst = satisfiesRange(candidate, range1, includePrerelease);
+        const inSecond = satisfiesRange(candidate, range2, includePrerelease);
+        if (inFirst.ok && inFirst.satisfied && inSecond.ok && inSecond.satisfied) {
+            witness = normalizeVersion(candidate);
+            break;
+        }
+    }
+    return { ok: true, value: { intersects: true, normalized1, normalized2, witness } };
 }
 /* ------------------------------------------------------------------ *
  * v0.2.0 — increment / difference / sort (npm semver 7.x parity)      *

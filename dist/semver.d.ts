@@ -57,6 +57,51 @@ export declare function satisfiesRange(version: ParsedVersion, range: string, in
 };
 /** Human-readable relation between two versions. */
 export declare function relationLabel(a: ParsedVersion, b: ParsedVersion): 'lt' | 'eq' | 'gt';
+export type MinVersionResult = {
+    ok: true;
+    value: {
+        min: string | null;
+        normalized: string;
+    };
+} | {
+    ok: false;
+    reason: string;
+};
+/**
+ * Lowest version that satisfies a range (npm semver.minVersion parity).
+ *
+ * npm algorithm, ported exactly: if 0.0.0 satisfies the range it is the answer,
+ * then 0.0.0-0, then per alternative set the highest lower bound (a ">" bound
+ * with no prerelease becomes patch+1, a prerelease bound gets ".0" appended) and
+ * the smallest of those across alternatives. The candidate is only returned when
+ * it actually satisfies the range, otherwise null — so unsatisfiable ranges
+ * ("^0.1.4 ~3.0.2", ">2.0.0 <2.0.1") report null instead of a plausible-looking
+ * bound.
+ */
+export declare function minVersionOfRange(range: string, includePrerelease?: boolean): MinVersionResult;
+export type IntersectResult = {
+    ok: true;
+    value: {
+        intersects: boolean;
+        normalized1: string;
+        normalized2: string;
+        witness: string | null;
+    };
+} | {
+    ok: false;
+    reason: string;
+};
+/**
+ * Whether any version satisfies both ranges (npm semver.intersects parity):
+ * alternative sets are compared pairwise, and a pair only counts when both sets
+ * are individually satisfiable.
+ *
+ * `witness` is best-effort, not minimal: boundary versions of the two ranges are
+ * probed and each candidate is verified against BOTH ranges with this plugin's
+ * own range matcher before it is reported (so a witness is never wrong, it can
+ * only be absent).
+ */
+export declare function rangesIntersect(range1: string, range2: string, includePrerelease?: boolean): IntersectResult;
 /** Release types supported by semver_inc (npm semver.inc). */
 export declare const INC_RELEASES: readonly ["major", "minor", "patch", "premajor", "preminor", "prepatch", "prerelease"];
 export type IncRelease = (typeof INC_RELEASES)[number];

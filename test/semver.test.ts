@@ -191,7 +191,9 @@ describe('satisfiesRange', () => {
 
   it('rejects malformed ranges with a reason', () => {
     expect(satisfiesRange(parse('1.2.3'), '').ok).toBe(false)
-    expect(satisfiesRange(parse('1.2.3'), '>=1.x').ok).toBe(false)
+    // v0.3.0: ">=1.x" is no longer malformed — npm rewrites it to ">=1.0.0" (x-range rule),
+    // so the malformed-range cases below stay genuinely unparseable.
+    expect(satisfiesRange(parse('1.2.3'), '1.2.3.4').ok).toBe(false)
     expect(satisfiesRange(parse('1.2.3'), 'banana').ok).toBe(false)
     expect(satisfiesRange(parse('1.2.3'), '>=1.2.0 - <2.0.0').ok).toBe(false) // hyphen endpoints with operators
   })

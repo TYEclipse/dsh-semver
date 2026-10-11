@@ -9,11 +9,13 @@
 
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
+  coerceVersion,
   diffKind,
   incVersion,
   INC_RELEASES,
   minVersionOfRange,
   normalizeVersion,
+  outsideRange,
   parseVersion,
   rangesIntersect,
   relationLabel,
@@ -32,6 +34,8 @@ export interface ToolSet {
   semver_sort: ToolDefinition
   semver_min_version: ToolDefinition
   semver_intersects: ToolDefinition
+  semver_coerce: ToolDefinition
+  semver_outside: ToolDefinition
 }
 
 function renderParse(value: unknown): string {
@@ -91,7 +95,32 @@ function renderSort(value: unknown): string {
   return result.invalidCount ? `${base} — skipped ${result.invalidCount} invalid` : base
 }
 
-/** Build all three tool definitions from the resolved config. */
+function renderCoerce(value: unknown): string {
+  const result = value as { valid: boolean; input: string; coerced?: string; note?: string; reason?: string }
+  if (!result.valid) return result.reason ?? `cannot coerce "${result.input}"`
+  if (result.coerced === undefined) {
+    return `no version-like number in "${result.input}"${result.note === undefined ? '' : ` — ${result.note}`}`
+  }
+  return `${result.input} → ${result.coerced}`
+}
+
+function renderOutside(value: unknown): string {
+  const result = value as { valid: boolean; version: string; range: string; relation?: string; normalized?: string; reason?: string }
+  if (!result.valid) return `cannot place "${result.version}" against "${result.range}": ${result.reason ?? 'unknown reason'}`
+  const normalized = result.normalized === undefined ? '' : ` (normalized: ${result.normalized})`
+  switch (result.relation) {
+    case 'inside':
+      return `${result.version} satisfies "${result.range}"${normalized}`
+    case 'above':
+      return `${result.version} is above every version "${result.range}" accepts${normalized}`
+    case 'below':
+      return `${result.version} is below every version "${result.range}" accepts${normalized}`
+    default:
+      return `${result.version} is not inside "${result.range}"${normalized}, but it is neither above nor below the whole range — the range has alternatives on both sides (npm reports gtr=false and ltr=false here)`
+  }
+}
+
+/** Build all ten tool definitions from the resolved config. */
 export function buildSemverTools(config: ResolvedConfig): ToolSet {
   const semver_parse = defineTool({
     name: 'semver_parse',
@@ -469,5 +498,116 @@ export function buildSemverTools(config: ResolvedConfig): ToolSet {
     },
   })
 
-  return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects }
+  const semver_coerce = defineTool({
+    name: 'semver_coerce',
+    description: 'Pull the first version-like number out of arbitrary text (npm semver.coerce parity, default options). '
+      + 'Finds a MAJOR[.MINOR[.PATCH]] number run bounded by non-digits and fills missing components with zeros: '
+      + '"node v18.16.1" → 18.16.1, "42" → 42.0.0, "1.2" → 1.2.0, "release-1.2.3.4" → 1.2.3 (npm consumes the digits '
+      + 'that follow, so a fourth component is dropped), "x.y.z" → no version. Beware what "first" means: '
+      + '"changelog 2026-10-12: 4.5.6" coerces to 2026.0.0, the date. Prerelease and build metadata in the source text '
+      + 'are DROPPED, exactly like npm\'s default (use semver_parse to keep them). Reports "no version-like number" '
+      + 'rather than inventing one, and when the matched number is beyond what npm can represent (a component above '
+      + 'Number.MAX_SAFE_INTEGER) it reports no version with a note saying why. Deterministic, read-only, no network.',
+    parameters: {
+      text: { type: 'string', required: true, description: 'Text to search, e.g. "expected node v18.16.1, found 20.11".' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          input: { type: 'string', required: true },
+          coerced: { type: 'string' },
+          major: { type: 'number' },
+          minor: { type: 'number' },
+          patch: { type: 'number' },
+          note: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { text: string }, value: unknown) => [{ type: 'text', text: renderCoerce(value) }],
+    },
+    async execute(args: { text: string }) {
+      const result = coerceVersion(args.text)
+      if (!result.ok) return { valid: false, input: args.text, reason: result.reason }
+      if (result.value.version === null) {
+        const out: { valid: boolean; input: string; note?: string } = { valid: true, input: args.text }
+        if (result.value.note !== null) out.note = result.value.note
+        return out
+      }
+      return {
+        valid: true,
+        input: args.text,
+        coerced: result.value.version,
+        major: result.value.major,
+        minor: result.value.minor,
+        patch: result.value.patch,
+      }
+    },
+  })
+
+  const semver_outside = defineTool({
+    name: 'semver_outside',
+    description: 'Place a version relative to a whole range (npm semver.gtr / semver.ltr parity): is it above every '
+      + 'version the range accepts, below every one, or inside it? Answers the "this version is not allowed — is it '
+      + 'too new or too old?" question that semver_satisfies alone cannot. Four outcomes: inside; above everything '
+      + '(gtr); below everything (ltr); or in a gap between alternatives (e.g. 2.0.0 against "^1.0.0 || ^3.0.0" is '
+      + 'neither inside nor above nor below — npm returns false for both directions, and the result says so). npm '
+      + 'quirks are preserved and visible: a prerelease never satisfies a plain range (tuple-lock), so npm classifies '
+      + 'it as above/below (gtr("1.2.3-beta.1", "<=1.2.3") is true) — satisfies, above and below are reported '
+      + 'separately so that case is never mistaken for an ordinary answer. Deterministic, read-only, no network.',
+    parameters: {
+      version: { type: 'string', required: true, description: 'Version to place, e.g. "2.0.0".' },
+      range: { type: 'string', required: true, description: 'Range expression, e.g. "^1.2.3 || ^3.0.0".' },
+      includePrerelease: { type: 'boolean', description: `Use prerelease semantics while classifying (default ${config.includePrerelease}).` },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          version: { type: 'string', required: true },
+          range: { type: 'string', required: true },
+          relation: { type: 'string', enum: ['inside', 'above', 'below', 'gap'] },
+          satisfies: { type: 'boolean' },
+          above: { type: 'boolean' },
+          below: { type: 'boolean' },
+          normalized: { type: 'string' },
+          explanation: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { version: string; range: string }, value: unknown) => [{ type: 'text', text: renderOutside(value) }],
+    },
+    async execute(args: { version: string; range: string; includePrerelease?: boolean }) {
+      const result = outsideRange(args.version, args.range, args.includePrerelease ?? config.includePrerelease)
+      if (!result.ok) return { valid: false, version: args.version, range: args.range, reason: result.reason }
+      const value = result.value
+      // The schema infers `relation` as a literal union — annotate it (defineTool discipline).
+      const relation: 'inside' | 'above' | 'below' | 'gap' =
+        value.satisfies ? 'inside' : value.above ? 'above' : value.below ? 'below' : 'gap'
+      const explanation = relation === 'inside'
+        ? `${args.version} satisfies "${args.range}"`
+        : relation === 'above'
+          ? `${args.version} is above every version "${args.range}" accepts`
+          : relation === 'below'
+            ? `${args.version} is below every version "${args.range}" accepts`
+            : `${args.version} is not inside "${args.range}" and is neither above nor below the whole range (the range has alternatives on both sides)`
+      return {
+        valid: true,
+        version: args.version,
+        range: args.range,
+        relation,
+        satisfies: value.satisfies,
+        above: value.above,
+        below: value.below,
+        normalized: value.normalized,
+        explanation,
+      }
+    },
+  })
+
+  return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects, semver_coerce, semver_outside }
 }

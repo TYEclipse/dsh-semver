@@ -140,6 +140,8 @@ function tupleOf(v) {
 function cmp(version, c) {
     const d = compareVersions(version, c.version);
     switch (c.op) {
+        case '':
+            return d === 0;
         case '>':
             return d > 0;
         case '>=':
@@ -168,8 +170,20 @@ function stripBuild(token) {
     const plus = token.indexOf('+');
     return plus >= 0 ? token.slice(0, plus) : token;
 }
-/** Parse a single comparator token into [lower, upper] comparators. */
-function parseToken(token) {
+/** Parse a single comparator token into [lower, upper] comparators.
+ *
+ * `npmShape` reproduces npm's own `Range.set` comparator shape instead of the
+ * `[<=, >=]` pair this plugin's matcher uses — `outsideRange` reads
+ * `comparator.op` the way npm does. Three npm behaviours are reproduced:
+ *   ① an exact version stays a *bare* comparator (`{op: '', version}`);
+ *   ② every exclusive upper bound npm **generates** (x-ranges, caret, tilde,
+ *      partial comparisons, hyphen upper endpoints) gets a `-0` prerelease
+ *      (`^1.2.3` → `<2.0.0-0`, `<=1.2` → `<1.3.0-0`) — bound arithmetic in
+ *      npm's `outside()` depends on it;
+ *   ③ a bare `>=0.0.0` comparator is dropped (npm's `replaceGTE0`), which is
+ *      why npm compiles `^0` to just `<1.0.0-0`.
+ */
+function parseToken(token, npmShape = false) {
     const t = stripBuild(token.trim());
     if (t === '')
         return { ok: true, comparators: [] };
@@ -182,7 +196,8 @@ function parseToken(token) {
     const rawPatch = m.groups?.patch;
     const preRaw = m.groups?.pre ?? null;
     const lower = (v) => ({ op: '>=', version: v });
-    const upper = (v) => ({ op: '<', version: v });
+    /** An exclusive upper bound. npm appends `-0` to every bound it generates (see above). */
+    const upper = (v) => npmShape ? { op: '<', version: { ...v, prerelease: ['0'] } } : { op: '<', version: v };
     const upperInc = (v) => ({ op: '<=', version: v });
     if (op === '' || op === '=') {
         // Exact version or partial / wildcard (no operator).
@@ -198,7 +213,7 @@ function parseToken(token) {
         }
         const patch = Number(rawPatch);
         const v = makeVersion(major, minor, patch, preRaw);
-        return { ok: true, comparators: [upperInc(v), lower(v)] };
+        return { ok: true, comparators: npmShape ? [{ op: '', version: v }] : [upperInc(v), lower(v)] };
     }
     if (op === '>=' || op === '<=' || op === '>' || op === '<') {
         // Partial versions combined with a comparison operator follow npm's x-range
@@ -274,13 +289,15 @@ function parseToken(token) {
     return { ok: true, comparators: [lower(base), upper(upperBound)] };
 }
 /** Expand one range alternative (a space-separated comparator set) into comparators. */
-function expandAlternative(alt) {
+function expandAlternative(alt, npmShape = false) {
     const trimmed = alt.trim();
     if (trimmed === '')
         return { ok: true, comparators: [] };
     const hyphen = HYPHEN_RE.exec(trimmed);
     if (hyphen !== null) {
-        // Hyphen ranges must stand alone in their alternative.
+        // Hyphen ranges must stand alone in their alternative. Endpoints go through
+        // the default (paired) parsing: npm compiles "1.2.3 - 2.3.4" into
+        // ">=1.2.3 <=2.3.4", never into bare comparators.
         const loToken = (hyphen[1] ?? '').trim();
         const hiToken = (hyphen[2] ?? '').trim();
         const lo = parseToken(loToken);
@@ -303,11 +320,12 @@ function expandAlternative(alt) {
             comparators.push({ op: '<=', version: hiFirst.version });
         }
         else if (hiFirst.op === '>=' && hi.comparators.length === 2) {
-            // Partial upper endpoint → exclusive, one unit past the last specified component.
+            // Partial upper endpoint → exclusive, one unit past the last specified
+            // component (npm: "1.2.3 - 2.3" → ">=1.2.3 <2.4.0-0").
             const hiUpper = hi.comparators[1];
             if (hiUpper === undefined)
                 return { ok: false, reason: `invalid range: cannot parse upper endpoint "${hiToken}"` };
-            comparators.push({ op: '<', version: hiUpper.version });
+            comparators.push(npmShape ? { op: '<', version: { ...hiUpper.version, prerelease: ['0'] } } : { op: '<', version: hiUpper.version });
         }
         else {
             return { ok: false, reason: `invalid range: hyphen endpoints "${loToken}" / "${hiToken}" must be plain versions` };
@@ -317,12 +335,20 @@ function expandAlternative(alt) {
     const tokens = trimmed.split(/\s+/);
     const comparators = [];
     for (const token of tokens) {
-        const parsed = parseToken(token);
+        const parsed = parseToken(token, npmShape);
         if (!parsed.ok)
             return parsed;
         comparators.push(...parsed.comparators);
     }
-    return { ok: true, comparators };
+    return { ok: true, comparators: npmShape ? dropRedundantLowerBound(comparators) : comparators };
+}
+/**
+ * npm's `replaceGTE0`: a bare `>=0.0.0` comparator is dropped from a range.
+ * It is why npm compiles `^0` to `<1.0.0-0` alone, and the outside() port has to
+ * see the same set (a `>=0.0.0` bound would change which comparator is `low`).
+ */
+function dropRedundantLowerBound(comparators) {
+    return comparators.filter((c) => !(c.op === '>=' && c.version.major === 0 && c.version.minor === 0 && c.version.patch === 0 && c.version.prerelease === null));
 }
 /** Render a comparator set as a compact normalized label. */
 function renderComparators(comparators) {
@@ -378,18 +404,34 @@ export function relationLabel(a, b) {
  * v0.3.0 — range algebra: minimum version / range intersection        *
  * ------------------------------------------------------------------ */
 /** Parse a range into its alternatives (each an AND-set of comparators). */
-function parseRangeSets(range) {
+function parseRangeSets(range, npmShape = false) {
     const trimmed = range.trim();
     if (trimmed === '')
         return { ok: false, reason: 'invalid range: empty string' };
     const sets = [];
     for (const alt of trimmed.split('||')) {
-        const expanded = expandAlternative(alt);
+        const expanded = expandAlternative(alt, npmShape);
         if (!expanded.ok)
             return expanded;
         sets.push(expanded.comparators);
     }
     return { ok: true, sets };
+}
+/**
+ * npm's own comparator shape for a range, as strings (`"npmRangeSets('^1.2.3')"`
+ * → `[['>=1.2.3', '<2.0.0-0']]`, a wildcard set → `[['ANY']]`). Exposed for the
+ * oracle sweep: it lets the test compare this parser against
+ * `new (require('semver').Range)(range).set` comparator for comparator instead
+ * of only through verdicts — the shape is what `outsideRange` walks.
+ */
+export function npmRangeSets(range) {
+    const parsed = parseRangeSets(range, true);
+    if (!parsed.ok)
+        return parsed;
+    return {
+        ok: true,
+        sets: parsed.sets.map((set) => (set.length === 0 ? ['ANY'] : set.map((c) => `${c.op}${normalizeVersion(c.version)}`))),
+    };
 }
 /**
  * Lowest version that satisfies a range (npm semver.minVersion parity).
@@ -550,6 +592,146 @@ export function rangesIntersect(range1, range2, includePrerelease = false) {
         }
     }
     return { ok: true, value: { intersects: true, normalized1, normalized2, witness } };
+}
+/* ------------------------------------------------------------------ *
+ * v0.4.0 — coerce (version out of messy text) / outside (gtr & ltr)    *
+ * ------------------------------------------------------------------ */
+/**
+ * npm's coerce() pattern, ported verbatim: a non-digit boundary, then 1–16
+ * digits for each of up to three components, then a trailing non-digit or the
+ * end of the string. The trailing boundary is *consumed* by the match, exactly
+ * as in npm — which is why "1.2.3.4" coerces to "1.2.3" and "9.8.7.6.5" to
+ * "9.8.7".
+ */
+const COERCE_CORE = String.raw `(^|[^\d])(\d{1,16})(?:\.(\d{1,16}))?(?:\.(\d{1,16}))?`;
+const COERCE_RE = new RegExp(`${COERCE_CORE}(?:$|[^\\d])`);
+/**
+ * Pull a version out of arbitrary text (npm `semver.coerce`, default options).
+ *
+ * `"node v18.16.1"` → 18.16.1, `"42"` → 42.0.0, `"1.2"` → 1.2.0,
+ * `"1.2.3-beta.1"` → 1.2.3 (npm's default drops prerelease/build metadata),
+ * `"x.y.z"` → no version at all, and `"changelog 2026-10-12: 4.5.6"` → 2026.0.0
+ * (the date comes first — coerced numbers are not "the version you meant").
+ *
+ * Two npm behaviours are surfaced rather than papered over: when the text has no
+ * version-like number the result is `version: null` (npm returns null too), and
+ * a matched number above `Number.MAX_SAFE_INTEGER` is *also* null to npm — its
+ * `parse()` swallows the `Invalid major version` error — so this returns null
+ * plus a `note` saying why, instead of inventing a rounded number.
+ */
+export function coerceVersion(input) {
+    const match = COERCE_RE.exec(input);
+    if (match === null)
+        return { ok: true, value: { version: null, major: null, minor: null, patch: null, note: null } };
+    const majorRaw = match[2] ?? '0';
+    const minorRaw = match[3] ?? '0';
+    const patchRaw = match[4] ?? '0';
+    const coerced = `${majorRaw}.${minorRaw}.${patchRaw}`;
+    const parsed = parseVersion(coerced);
+    const outOfRange = (value) => value > Number.MAX_SAFE_INTEGER;
+    if (!parsed.ok || outOfRange(Number(majorRaw)) || outOfRange(Number(minorRaw)) || outOfRange(Number(patchRaw))) {
+        // npm: `parse()` returns null when the SemVer constructor throws, so a
+        // 16-digit component is simply "not a version" — report that, with the why.
+        return {
+            ok: true,
+            value: {
+                version: null,
+                major: null,
+                minor: null,
+                patch: null,
+                note: `the first version-like number in the input ("${coerced}") is not a version npm can represent (${parsed.ok ? 'a component is above Number.MAX_SAFE_INTEGER' : parsed.reason})`,
+            },
+        };
+    }
+    return {
+        ok: true,
+        value: {
+            version: normalizeVersion(parsed.value),
+            major: parsed.value.major,
+            minor: parsed.value.minor,
+            patch: parsed.value.patch,
+            note: null,
+        },
+    };
+}
+/** npm substitutes this for a wildcard comparator inside outside(): `>=0.0.0`. */
+const ANY_COMPARATOR = { op: '>=', version: { major: 0, minor: 0, patch: 0, prerelease: null, build: null } };
+/**
+ * npm's `outside(version, range, hilo)` — "is this version above (or below)
+ * every version the range accepts?" — ported comparator by comparator.
+ *
+ * Reads `comparator.op` the way npm does, so it needs npm's comparator shape
+ * (`npmShape`) rather than the `[<=, >=]` pair the matcher uses; a wildcard
+ * AND-set (this parser's empty set) stands in for npm's `ANY` comparator.
+ */
+function outsideOneWay(version, sets, hilo) {
+    const gtfn = (a, b) => hilo === '>' ? compareVersions(a, b) > 0 : compareVersions(a, b) < 0;
+    const ltfn = (a, b) => hilo === '>' ? compareVersions(a, b) < 0 : compareVersions(a, b) > 0;
+    const ltefn = (a, b) => hilo === '>' ? compareVersions(a, b) <= 0 : compareVersions(a, b) >= 0;
+    const comp = hilo;
+    const ecomp = hilo === '>' ? '>=' : '<=';
+    for (const rawSet of sets) {
+        const set = rawSet.length === 0 ? [ANY_COMPARATOR] : rawSet;
+        let high = null;
+        let low = null;
+        for (const comparator of set) {
+            if (high === null)
+                high = comparator;
+            if (low === null)
+                low = comparator;
+            if (high !== null && gtfn(comparator.version, high.version))
+                high = comparator;
+            else if (low !== null && ltfn(comparator.version, low.version))
+                low = comparator;
+        }
+        if (high === null || low === null)
+            continue;
+        if (high.op === comp || high.op === ecomp)
+            return false;
+        if ((low.op === '' || low.op === comp) && ltefn(version, low.version))
+            return false;
+        else if (low.op === ecomp && ltfn(version, low.version))
+            return false;
+    }
+    return true;
+}
+/**
+ * npm `semver.gtr` / `semver.ltr` in one call: a version sits **above** all the
+ * versions a range accepts, **below** all of them, **inside** the range, or in
+ * a **gap** between alternatives (`^1.0.0 || ^3.0.0` with 2.0.0: not inside,
+ * yet neither above nor below — npm reports false for both directions).
+ *
+ * npm's own quirks are preserved and surfaced rather than hidden: a prerelease
+ * is never matched by a plain range (tuple-lock), so `outside()` classifies it
+ * as above/below even though it is neither semantically (e.g. npm reports
+ * `gtr("1.2.3-beta.1", "<=1.2.3") === true`). The caller can tell that apart
+ * from an ordinary answer because `satisfies`, `above` and `below` are all
+ * reported — this function invents no verdict of its own.
+ */
+export function outsideRange(version, range, includePrerelease = false) {
+    const parsedVersion = parseVersion(version);
+    if (!parsedVersion.ok)
+        return parsedVersion;
+    const parsedSets = parseRangeSets(range, true);
+    if (!parsedSets.ok)
+        return parsedSets;
+    const value = parsedVersion.value;
+    const satisfied = satisfiesRange(value, range, includePrerelease);
+    if (!satisfied.ok)
+        return satisfied;
+    const normalized = parsedSets.sets.map((set) => renderComparators(set)).join(' || ');
+    if (satisfied.satisfied) {
+        return { ok: true, value: { satisfies: true, above: false, below: false, normalized } };
+    }
+    return {
+        ok: true,
+        value: {
+            satisfies: false,
+            above: outsideOneWay(value, parsedSets.sets, '>'),
+            below: outsideOneWay(value, parsedSets.sets, '<'),
+            normalized,
+        },
+    };
 }
 /* ------------------------------------------------------------------ *
  * v0.2.0 — increment / difference / sort (npm semver 7.x parity)      *

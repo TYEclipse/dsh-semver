@@ -2,6 +2,8 @@
  * Tool-level tests for dsh-semver — exercises each defineTool surface through
  * the built ToolSet, including invalid input paths and output shape stability.
  *
+ * ORACLE: test/oracle/range-algebra-oracle.mjs
+ *
  * @module dsh-semver/test
  */
 
@@ -256,5 +258,101 @@ describe('semver_intersects tool', () => {
     expect(out.intersects).toBe(false)
     expect(out.reason?.length).toBeGreaterThan(0)
     assertNoUndefined(out)
+  })
+})
+
+describe('semver_coerce tool', () => {
+  it('pulls a version out of a sentence (npm anchor)', async () => {
+    const out = await tools.semver_coerce.execute({ text: 'expected node v18.16.1, found 20.11' })
+    expect(out.valid).toBe(true)
+    expect(out.coerced).toBe('18.16.1')
+    expect(out.major).toBe(18)
+    expect(out.minor).toBe(16)
+    expect(out.patch).toBe(1)
+    assertNoUndefined(out)
+  })
+
+  it('fills missing components with zeros and drops what npm drops (npm anchors)', async () => {
+    expect((await tools.semver_coerce.execute({ text: 'v2' })).coerced).toBe('2.0.0')
+    expect((await tools.semver_coerce.execute({ text: 'release-1.2' })).coerced).toBe('1.2.0')
+    expect((await tools.semver_coerce.execute({ text: '1.2.3-beta.1+build.9' })).coerced).toBe('1.2.3')
+    // npm consumes the digits that follow the match, so a fourth component is dropped.
+    expect((await tools.semver_coerce.execute({ text: '1.2.3.4' })).coerced).toBe('1.2.3')
+  })
+
+  it('reports "no version" without inventing one, and never an undefined key', async () => {
+    const out = await tools.semver_coerce.execute({ text: 'x.y.z' })
+    expect(out.valid).toBe(true)
+    expect('coerced' in out).toBe(false)
+    assertNoUndefined(out)
+    const render = tools.semver_coerce.output.render as unknown as
+      (args: { text: string }, value: unknown) => { text?: string }[]
+    expect(render({ text: 'x.y.z' }, out)[0]?.text).toContain('no version-like number')
+  })
+
+  it('reports an unrepresentable number as no-version with the reason (npm returns null)', async () => {
+    const out = await tools.semver_coerce.execute({ text: 'v9999999999999999' })
+    expect(out.valid).toBe(true)
+    expect('coerced' in out).toBe(false)
+    expect(out.note).toContain('MAX_SAFE_INTEGER')
+    const render = tools.semver_coerce.output.render as unknown as
+      (args: { text: string }, value: unknown) => { text?: string }[]
+    expect(render({ text: 'v9999999999999999' }, out)[0]?.text).toContain('MAX_SAFE_INTEGER')
+    assertNoUndefined(out)
+  })
+})
+
+describe('semver_outside tool', () => {
+  it('says "above" for a version newer than everything the range accepts (npm gtr anchor)', async () => {
+    const out = await tools.semver_outside.execute({ version: '2.0.0', range: '^1.2.3' })
+    expect(out.valid).toBe(true)
+    expect(out.relation).toBe('above')
+    expect(out.above).toBe(true)
+    expect(out.below).toBe(false)
+    expect(out.satisfies).toBe(false)
+    assertNoUndefined(out)
+  })
+
+  it('says "below" for an older version and "inside" for a matching one (npm ltr anchor)', async () => {
+    const below = await tools.semver_outside.execute({ version: '1.0.0', range: '^1.2.3' })
+    expect(below.relation).toBe('below')
+    const inside = await tools.semver_outside.execute({ version: '1.4.0', range: '^1.2.3' })
+    expect(inside.relation).toBe('inside')
+    expect(inside.satisfies).toBe(true)
+    assertNoUndefined(below)
+    assertNoUndefined(inside)
+  })
+
+  it('names the gap between alternatives instead of forcing a direction (npm anchor)', async () => {
+    // npm: gtr("2.0.0", "^1.0.0 || ^3.0.0") === false && ltr(...) === false.
+    const out = await tools.semver_outside.execute({ version: '2.0.0', range: '^1.0.0 || ^3.0.0' })
+    expect(out.relation).toBe('gap')
+    expect(out.satisfies).toBe(false)
+    expect(out.above).toBe(false)
+    expect(out.below).toBe(false)
+    const render = tools.semver_outside.output.render as unknown as
+      (args: { version: string; range: string }, value: unknown) => { text?: string }[]
+    expect(render({ version: '2.0.0', range: '^1.0.0 || ^3.0.0' }, out)[0]?.text).toContain('neither above nor below')
+    assertNoUndefined(out)
+  })
+
+  it('surfaces npm\'s tuple-lock quirk rather than smoothing it over (npm anchor)', async () => {
+    // A prerelease cannot satisfy a plain range, so npm reports gtr AND ltr true
+    // here (npm grid: ">=1.2.0 <2.0.0" vs 1.2.3-beta.1 is in both lists).
+    const out = await tools.semver_outside.execute({ version: '1.2.3-beta.1', range: '>=1.2.0 <2.0.0' })
+    expect(out.satisfies).toBe(false)
+    expect(out.above).toBe(true)
+    expect(out.below).toBe(true)
+    assertNoUndefined(out)
+  })
+
+  it('reports invalid versions and ranges', async () => {
+    const bad = await tools.semver_outside.execute({ version: 'not-a-version', range: '^1.2.3' })
+    expect(bad.valid).toBe(false)
+    expect(bad.reason?.length).toBeGreaterThan(0)
+    const badRange = await tools.semver_outside.execute({ version: '1.2.3', range: 'not-a-range' })
+    expect(badRange.valid).toBe(false)
+    assertNoUndefined(bad)
+    assertNoUndefined(badRange)
   })
 })

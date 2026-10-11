@@ -1,6 +1,8 @@
 /**
  * v0.3.0 range-algebra tests — driven by an independent oracle.
  *
+ * ORACLE: test/oracle/range-algebra-oracle.mjs
+ *
  * Every expectation in this file comes from `test/anchors/range-algebra.json`,
  * which is raw output of **npm's own semver package** (see
  * test/oracle/range-algebra-oracle.mjs). No expected value here is hand-written:

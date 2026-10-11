@@ -17,7 +17,9 @@ export interface ToolSet {
     semver_sort: ToolDefinition;
     semver_min_version: ToolDefinition;
     semver_intersects: ToolDefinition;
+    semver_coerce: ToolDefinition;
+    semver_outside: ToolDefinition;
 }
-/** Build all three tool definitions from the resolved config. */
+/** Build all ten tool definitions from the resolved config. */
 export declare function buildSemverTools(config: ResolvedConfig): ToolSet;
 //# sourceMappingURL=tools.d.ts.map

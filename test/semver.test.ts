@@ -2,6 +2,8 @@
  * Core semantic versioning tests — every assertion is a known anchor from the
  * semver 2.0.0 spec or npm's documented range behavior, never a self-roundtrip.
  *
+ * ORACLE: test/oracle/range-algebra-oracle.mjs
+ *
  * @module dsh-semver/test
  */
 

@@ -992,3 +992,128 @@ export function sortVersionStrings(inputs: readonly string[], order: 'asc' | 'de
   })
   return { ok: true, value: { sorted: entries.map((e) => e.normalized), invalid } }
 }
+
+/* ------------------------------------------------------------------ *
+ * v0.5.0 — range explanation: why a version does (not) match          *
+ * ------------------------------------------------------------------ */
+
+/** One comparator's verdict for a candidate version. */
+export interface ComparatorVerdict {
+  /** Normalized comparator text, e.g. ">=1.2.3". */
+  comparator: string
+  /** The version the comparator tests against (its bound), e.g. "1.2.3". */
+  bound: string
+  /** Precedence of the candidate relative to that bound. */
+  relation: 'lt' | 'eq' | 'gt'
+  /** Whether this single comparator accepted the candidate (prerelease rule excluded). */
+  ok: boolean
+}
+
+/** One alternative (`||` branch) of a range, explained. */
+export interface SetExplanation {
+  /** Canonical comparator set, e.g. ">=1.2.3 <2.0.0-0". */
+  label: string
+  /** Whether the candidate satisfies this alternative as a whole. */
+  ok: boolean
+  /** Comparators that rejected the candidate (empty when the prerelease rule did the rejecting). */
+  rejectedBy: string[]
+  comparators: ComparatorVerdict[]
+  candidateIsPrerelease: boolean
+  /** npm's tuple-lock applies: the candidate is a prerelease and prerelease matching is off. */
+  tupleLockActive: boolean
+  /** Whether the prerelease rule lets the candidate through (same [major, minor, patch] pinned by a comparator). */
+  prereleaseAllowed: boolean
+  /** The tuple a comparator pins with a prerelease (only meaningful when the candidate is a prerelease). */
+  pinnedTuple: string | null
+}
+
+export type ExplainResult = {
+  satisfied: boolean
+  normalized: string
+  sets: SetExplanation[]
+  because: string
+}
+
+const RELATION_WORD: Record<'lt' | 'eq' | 'gt', string> = {
+  lt: 'lower than',
+  eq: 'equal to',
+  gt: 'greater than',
+}
+
+/**
+ * Explain why a version does or does not satisfy an npm-style range: every
+ * alternative (`||` branch) is broken down into its comparators, each one
+ * resolved to accepted/rejected plus the precedence that decided it, and the
+ * prerelease tuple-lock is reported separately from comparator failures.
+ *
+ * This is the diagnostic `satisfiesRange` cannot give: "does not satisfy" is
+ * the same answer whether a bound was missed by one patch or the candidate is
+ * a prerelease that no plain range can ever match.
+ */
+export function explainRange(
+  version: ParsedVersion,
+  range: string,
+  includePrerelease = false,
+): { ok: true; value: ExplainResult } | { ok: false; reason: string } {
+  const trimmed = range.trim()
+  if (trimmed === '') return { ok: false, reason: 'invalid range: empty string' }
+
+  const sets: SetExplanation[] = []
+  for (const alt of trimmed.split('||')) {
+    // Explain with **npm's** comparator shape (`npmShape`), so the labels match
+    // what a resolver actually builds: `^1.2.3` → `>=1.2.3 <2.0.0-0`. The
+    // matcher itself uses the `<2.0.0` form and relies on the tuple-lock, which
+    // is why reporting the matcher's shape here would misdescribe npm.
+    const expanded = expandAlternative(alt, true)
+    if (!expanded.ok) return expanded
+    const comparators = expanded.comparators
+    const verdicts: ComparatorVerdict[] = comparators.map((c) => ({
+      comparator: `${c.op}${normalizeVersion(c.version)}`,
+      bound: normalizeVersion(c.version),
+      relation: relationLabel(version, c.version),
+      ok: cmp(version, c),
+    }))
+    const candidateIsPrerelease = version.prerelease !== null && version.prerelease.length > 0
+    const tupleLockActive = candidateIsPrerelease && !includePrerelease
+    // Comparators are reported in the same canonical order the label uses.
+    verdicts.sort((a, b) => (a.comparator < b.comparator ? -1 : 1))
+    const pinning = comparators.find(
+      (c) => c.version.prerelease !== null && tupleOf(c.version) === tupleOf(version),
+    )
+    const prereleaseAllowed = !tupleLockActive || pinning !== undefined
+    const rejectedBy = verdicts.filter((v) => !v.ok).map((v) => v.comparator)
+    sets.push({
+      label: renderComparators(comparators),
+      ok: prereleaseAllowed && rejectedBy.length === 0,
+      rejectedBy,
+      comparators: verdicts,
+      candidateIsPrerelease,
+      tupleLockActive,
+      prereleaseAllowed,
+      pinnedTuple: pinning === undefined ? null : tupleOf(pinning.version),
+    })
+  }
+
+  const satisfied = sets.some((s) => s.ok)
+  const normalized = sets.map((s) => s.label).join(' || ')
+  const rendered = normalizeVersion(version)
+  let because: string
+  if (satisfied) {
+    const via = sets.find((s) => s.ok) as SetExplanation
+    because = `${rendered} satisfies "${trimmed}" via the alternative "${via.label}"${sets.length > 1 ? ` (${sets.length} alternatives checked)` : ''}`
+  } else {
+    // Report the closest alternative: fewest rejected comparators, ties by order.
+    const closest = sets.reduce((best, s) => (s.rejectedBy.length < best.rejectedBy.length ? s : best), sets[0] as SetExplanation)
+    if (closest.rejectedBy.length === 0) {
+      because = `${rendered} meets every comparator of "${closest.label}" but npm's prerelease rule rejects it: the candidate is a prerelease and no comparator in that alternative pins ${tupleOf(version)}-x (tuple-lock). Widen the range to ${tupleOf(version)}-0 or compare with includePrerelease`
+    } else {
+      const details = closest.comparators
+        .filter((c) => !c.ok)
+        .map((c) => `${c.comparator} (${rendered} is ${RELATION_WORD[c.relation]} ${c.bound})`)
+        .join(', ')
+      because = `${rendered} does not satisfy "${trimmed}"; closest alternative "${closest.label}" rejects ${closest.rejectedBy.length} of ${closest.comparators.length} comparators: ${details}`
+    }
+  }
+
+  return { ok: true, value: { satisfied, normalized, sets, because } }
+}

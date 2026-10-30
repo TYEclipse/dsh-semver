@@ -9,7 +9,8 @@
   "pairRangeCount": 20,
   "versionCount": 16,
   "coerceCount": 28,
-  "outsideCount": 864
+  "outsideCount": 864,
+  "explainCount": 11
  },
  "minVersions": {
   "1": "1.0.0",
@@ -10399,6 +10400,283 @@
    "1.2.3+build.5",
    false,
    false
+  ]
+ ],
+ "explain": [
+  [
+   "1.2.3-beta.1",
+   ">=1.0.0",
+   false,
+   [
+    {
+     "label": ">=1.0.0",
+     "comparators": [
+      [
+       ">=1.0.0",
+       true
+      ]
+     ],
+     "prereleaseAllowed": false,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "1.2.3-beta.1",
+   ">=1.2.3-0",
+   true,
+   [
+    {
+     "label": ">=1.2.3-0",
+     "comparators": [
+      [
+       ">=1.2.3-0",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": "1.2.3"
+    }
+   ]
+  ],
+  [
+   "1.2.3",
+   "^1.2.3",
+   true,
+   [
+    {
+     "label": "<2.0.0-0 >=1.2.3",
+     "comparators": [
+      [
+       "<2.0.0-0",
+       true
+      ],
+      [
+       ">=1.2.3",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "1.2.0",
+   "^1.2.3",
+   false,
+   [
+    {
+     "label": "<2.0.0-0 >=1.2.3",
+     "comparators": [
+      [
+       "<2.0.0-0",
+       true
+      ],
+      [
+       ">=1.2.3",
+       false
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "0.2.1-rc.2",
+   ">=0.2.1-rc.3 <0.3.0-0",
+   false,
+   [
+    {
+     "label": "<0.3.0-0 >=0.2.1-rc.3",
+     "comparators": [
+      [
+       "<0.3.0-0",
+       true
+      ],
+      [
+       ">=0.2.1-rc.3",
+       false
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": "0.2.1"
+    }
+   ]
+  ],
+  [
+   "2.0.0",
+   "^1.0.0 || ^3.0.0",
+   false,
+   [
+    {
+     "label": "<2.0.0-0 >=1.0.0",
+     "comparators": [
+      [
+       "<2.0.0-0",
+       false
+      ],
+      [
+       ">=1.0.0",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": "2.0.0"
+    },
+    {
+     "label": "<4.0.0-0 >=3.0.0",
+     "comparators": [
+      [
+       "<4.0.0-0",
+       true
+      ],
+      [
+       ">=3.0.0",
+       false
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "2.0.0",
+   "^1.0.0 || ^2.0.0",
+   true,
+   [
+    {
+     "label": "<2.0.0-0 >=1.0.0",
+     "comparators": [
+      [
+       "<2.0.0-0",
+       false
+      ],
+      [
+       ">=1.0.0",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": "2.0.0"
+    },
+    {
+     "label": "<3.0.0-0 >=2.0.0",
+     "comparators": [
+      [
+       "<3.0.0-0",
+       true
+      ],
+      [
+       ">=2.0.0",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "2.0.0-0",
+   "^1.0.0 || ^2.0.0",
+   false,
+   [
+    {
+     "label": "<2.0.0-0 >=1.0.0",
+     "comparators": [
+      [
+       "<2.0.0-0",
+       false
+      ],
+      [
+       ">=1.0.0",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": "2.0.0"
+    },
+    {
+     "label": "<3.0.0-0 >=2.0.0",
+     "comparators": [
+      [
+       "<3.0.0-0",
+       true
+      ],
+      [
+       ">=2.0.0",
+       false
+      ]
+     ],
+     "prereleaseAllowed": false,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "1.2.3+build.5",
+   "1.2.3 - 2.3.4",
+   true,
+   [
+    {
+     "label": "<=2.3.4 >=1.2.3",
+     "comparators": [
+      [
+       "<=2.3.4",
+       true
+      ],
+      [
+       ">=1.2.3",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "0.0.0-0",
+   ">=0.0.1",
+   false,
+   [
+    {
+     "label": ">=0.0.1",
+     "comparators": [
+      [
+       ">=0.0.1",
+       false
+      ]
+     ],
+     "prereleaseAllowed": false,
+     "pinnedTuple": null
+    }
+   ]
+  ],
+  [
+   "1.2.4",
+   ">1.2.3 <1.2.4",
+   false,
+   [
+    {
+     "label": "<1.2.4 >1.2.3",
+     "comparators": [
+      [
+       "<1.2.4",
+       false
+      ],
+      [
+       ">1.2.3",
+       true
+      ]
+     ],
+     "prereleaseAllowed": true,
+     "pinnedTuple": null
+    }
+   ]
   ]
  ]
 }

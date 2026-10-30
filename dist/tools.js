@@ -7,7 +7,7 @@
  * @module dsh-semver/tools
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { coerceVersion, diffKind, incVersion, INC_RELEASES, minVersionOfRange, normalizeVersion, outsideRange, parseVersion, rangesIntersect, relationLabel, satisfiesRange, sortVersionStrings, } from "./semver.js";
+import { coerceVersion, diffKind, explainRange, incVersion, INC_RELEASES, minVersionOfRange, normalizeVersion, outsideRange, parseVersion, rangesIntersect, relationLabel, satisfiesRange, sortVersionStrings, } from "./semver.js";
 function renderParse(value) {
     const result = value;
     if (!result.valid)
@@ -90,7 +90,21 @@ function renderOutside(value) {
             return `${result.version} is not inside "${result.range}"${normalized}, but it is neither above nor below the whole range — the range has alternatives on both sides (npm reports gtr=false and ltr=false here)`;
     }
 }
-/** Build all ten tool definitions from the resolved config. */
+function renderExplain(value) {
+    const result = value;
+    if (!result.valid)
+        return `cannot explain "${result.version}" against "${result.range}": ${result.reason ?? 'unknown reason'}`;
+    const lines = [`${result.version} ${result.satisfied === true ? 'satisfies' : 'does NOT satisfy'} "${result.range}"`, `  why: ${result.because ?? ''}`];
+    for (const set of result.sets ?? []) {
+        lines.push(`  alternative "${set.label}" → ${set.ok ? 'accepted' : 'rejected'}`);
+        for (const comparator of set.comparators)
+            lines.push(`    ${comparator}`);
+        if (set.rejectedBy.length === 0 && !set.ok)
+            lines.push('    (all comparators accepted — the prerelease tuple-lock rejected the candidate)');
+    }
+    return lines.join('\n');
+}
+/** Build all eleven tool definitions from the resolved config. */
 export function buildSemverTools(config) {
     const semver_parse = defineTool({
         name: 'semver_parse',
@@ -574,6 +588,86 @@ export function buildSemverTools(config) {
             };
         },
     });
-    return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects, semver_coerce, semver_outside };
+    const semver_explain = defineTool({
+        name: 'semver_explain',
+        description: 'Explain WHY a version does or does not satisfy an npm-style range — the diagnostic semver_satisfies cannot give. '
+            + 'Every alternative (`||` branch) is expanded into the comparators npm would build (`^1.2.3` → `>=1.2.3 <2.0.0-0`), and each one is reported '
+            + 'as accepted or rejected together with the precedence that decided it (\"1.2.0 is lower than 1.2.3\"). The prerelease rule is reported '
+            + 'SEPARATELY from comparator failures: when every comparator accepts a prerelease but no comparator pins the same [major, minor, patch] tuple, '
+            + 'the answer is \"tuple-lock\", not \"bound missed\" (\"1.2.3-beta.1\" against \">=1.0.0\"). Failing alternatives report how many comparators rejected '
+            + 'the candidate and the closest one; a rejected candidate never gets a vague \"does not satisfy\". Deterministic, read-only, no network.',
+        parameters: {
+            version: { type: 'string', required: true, description: 'Version to explain, e.g. "1.2.3-beta.1".' },
+            range: { type: 'string', required: true, description: 'Range expression, e.g. "^1.2.3", ">=1.0.0 <2.0.0 || ^3.0.0".' },
+            includePrerelease: { type: 'boolean', description: `Explain with prerelease matching on (default ${config.includePrerelease}).` },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    version: { type: 'string', required: true },
+                    range: { type: 'string', required: true },
+                    satisfied: { type: 'boolean' },
+                    setCount: { type: 'number' },
+                    normalized: { type: 'string' },
+                    because: { type: 'string' },
+                    sets: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                label: { type: 'string', required: true },
+                                ok: { type: 'boolean', required: true },
+                                rejectedBy: { type: 'array', items: { type: 'string' } },
+                                comparators: { type: 'array', items: { type: 'string' } },
+                                candidateIsPrerelease: { type: 'boolean' },
+                                tupleLockActive: { type: 'boolean' },
+                                prereleaseAllowed: { type: 'boolean' },
+                                pinnedTuple: { type: 'string' },
+                            },
+                        },
+                    },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderExplain(value) }],
+        },
+        async execute(args) {
+            const parsed = parseVersion(args.version);
+            if (!parsed.ok)
+                return { valid: false, version: args.version, range: args.range, reason: parsed.reason };
+            const result = explainRange(parsed.value, args.range, args.includePrerelease ?? config.includePrerelease);
+            if (!result.ok)
+                return { valid: false, version: args.version, range: args.range, reason: result.reason };
+            const value = result.value;
+            return {
+                valid: true,
+                version: normalizeVersion(parsed.value),
+                range: args.range,
+                satisfied: value.satisfied,
+                setCount: value.sets.length,
+                normalized: value.normalized,
+                because: value.because,
+                sets: value.sets.map((set) => {
+                    const out = {
+                        label: set.label,
+                        ok: set.ok,
+                        rejectedBy: set.rejectedBy,
+                        comparators: set.comparators.map((c) => `${c.comparator} → ${c.ok ? 'accepted' : 'rejected'} (candidate is ${c.relation === 'lt' ? 'lower than' : c.relation === 'gt' ? 'greater than' : 'equal to'} ${c.bound})`),
+                        candidateIsPrerelease: set.candidateIsPrerelease,
+                        tupleLockActive: set.tupleLockActive,
+                        prereleaseAllowed: set.prereleaseAllowed,
+                    };
+                    if (set.pinnedTuple !== null)
+                        out.pinnedTuple = set.pinnedTuple;
+                    return out;
+                }),
+            };
+        },
+    });
+    return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects, semver_coerce, semver_outside, semver_explain };
 }
 //# sourceMappingURL=tools.js.map

@@ -238,4 +238,55 @@ export type SortResult = {
  * reported with their input index; valid entries are still sorted.
  */
 export declare function sortVersionStrings(inputs: readonly string[], order?: 'asc' | 'desc'): SortResult;
+/** One comparator's verdict for a candidate version. */
+export interface ComparatorVerdict {
+    /** Normalized comparator text, e.g. ">=1.2.3". */
+    comparator: string;
+    /** The version the comparator tests against (its bound), e.g. "1.2.3". */
+    bound: string;
+    /** Precedence of the candidate relative to that bound. */
+    relation: 'lt' | 'eq' | 'gt';
+    /** Whether this single comparator accepted the candidate (prerelease rule excluded). */
+    ok: boolean;
+}
+/** One alternative (`||` branch) of a range, explained. */
+export interface SetExplanation {
+    /** Canonical comparator set, e.g. ">=1.2.3 <2.0.0-0". */
+    label: string;
+    /** Whether the candidate satisfies this alternative as a whole. */
+    ok: boolean;
+    /** Comparators that rejected the candidate (empty when the prerelease rule did the rejecting). */
+    rejectedBy: string[];
+    comparators: ComparatorVerdict[];
+    candidateIsPrerelease: boolean;
+    /** npm's tuple-lock applies: the candidate is a prerelease and prerelease matching is off. */
+    tupleLockActive: boolean;
+    /** Whether the prerelease rule lets the candidate through (same [major, minor, patch] pinned by a comparator). */
+    prereleaseAllowed: boolean;
+    /** The tuple a comparator pins with a prerelease (only meaningful when the candidate is a prerelease). */
+    pinnedTuple: string | null;
+}
+export type ExplainResult = {
+    satisfied: boolean;
+    normalized: string;
+    sets: SetExplanation[];
+    because: string;
+};
+/**
+ * Explain why a version does or does not satisfy an npm-style range: every
+ * alternative (`||` branch) is broken down into its comparators, each one
+ * resolved to accepted/rejected plus the precedence that decided it, and the
+ * prerelease tuple-lock is reported separately from comparator failures.
+ *
+ * This is the diagnostic `satisfiesRange` cannot give: "does not satisfy" is
+ * the same answer whether a bound was missed by one patch or the candidate is
+ * a prerelease that no plain range can ever match.
+ */
+export declare function explainRange(version: ParsedVersion, range: string, includePrerelease?: boolean): {
+    ok: true;
+    value: ExplainResult;
+} | {
+    ok: false;
+    reason: string;
+};
 //# sourceMappingURL=semver.d.ts.map

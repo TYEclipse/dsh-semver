@@ -2,6 +2,15 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-semver`
 
+## [0.5.0] — 2026-10-31
+### Minor · R85
+- [自主进化] R85 新增 semver_explain（逐比较符解释 + tuple-lock 与边界未过分开报；解释用 npm 的 Range.set 形状）
+- **新增第十一个工具 `semver_explain`**：回答「为什么这个版本不满足这个范围」。每个 `||` 分支展开成**npm 真正会用的比较符**，逐条给出「接受 / 拒绝」以及决定它的优先级关系（`>=0.2.1-rc.3` → `0.2.1-rc.2 低于 0.2.1-rc.3`）；整段结果里另有 `because` 一句话、`normalized` 归一化范围、`setCount` 分支数与「最接近的分支」判定（按被拒比较符最少）
+- **把「预发布规则」与「边界没过」分开报**：候选是预发布且某分支比较符全部通过时，结论是 **tuple-lock** 而不是「差一点」——并指出能放行的钉法（把范围写到 `1.2.3-0`，或用 `includePrerelease`）。这正是 `semver_satisfies` 的盲区：同一个 `false` 覆盖了「差一个 patch」「高一整个大版本」「预发布永远匹配不上」三种完全不同的原因
+- **比较符形状用 npm 的，不用匹配器的**：匹配器内部以 `<2.0.0` 表示上界并靠 tuple-lock 兜住预发布，而 npm 的 `Range.set` 生成 `<2.0.0-0`；解释走 `npmShape` 分支，所以 `^1.2.3` 显示为 `>=1.2.3 <2.0.0-0`（写测试时正是这里先报红：最初按匹配器形状输出，`<2.0.0` 与 npm 形状对不上，改成 npm 形状后一致）
+- **测试**：154 → **176**（新增 22 条：864 条锚点语料的全量结论对拍、11 条解释用例的**结构**对拍（每个比较符的 npm 判定、`prereleaseAllowed`、`pinnedTuple`、`rejectedBy`、`ok` 的推导）、tuple-lock 与边界未过两类分档、OR 分支「最接近」、`includePrerelease` 开关、工具层 lossless 输出与渲染、非法输入不编解释）；覆盖率 **92.55% → 93.41%**（基线棘轮上调）
+- **oracle 扩 `explain` 区（独立于实现）**：比较符与逐条判定取自 npm 的 `Comparator.test`（**不含**预发布规则），`satisfied` 取自 npm 的 `Range.test`，tuple-lock 由 npm 的比较符对象反推——于是「工具的拆分」与「npm 的结论」是两条独立路径；`--check` 新增不变量：用各部分能否重新推导出 npm 的结论、语料必须同时含「比较符全过却被锁」与「OR 多分支」两类，缺任一即自检失败
+
 ## [0.4.0] — 2026-10-12
 ### Minor · R67
 - [自主进化] R67 新增 `semver_coerce`（npm `semver.coerce` 对齐）+ `semver_outside`（npm `semver.gtr`/`ltr` 对齐，含「空隙」与 tuple-lock 的诚实呈现）；oracle 迁到 npm 锚点（新增 coerce / outside / 比较符集合三个区）+ 自检 `--check`

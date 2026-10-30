@@ -4,7 +4,7 @@
 
 Agent 经常算错版本号问题——`1.0.0-beta.11` 和 `1.0.0-beta.2` 谁大？`1.2.4-beta.1` 是否满足 `^1.2.3`？`1.2.4-beta.0` 递增后是什么？本插件把这类问题变成确定性的工具调用。
 
-## 十个工具
+## 十一个工具
 
 | 工具 | 功能 |
 |------|------|
@@ -18,6 +18,30 @@ Agent 经常算错版本号问题——`1.0.0-beta.11` 和 `1.0.0-beta.2` 谁大
 | `semver_intersects` | 两个范围是否可能被同一个版本同时满足（npm `semver.intersects`）；有交集时额外给出一个**已验证**同时满足两者的示例版本 |
 | `semver_coerce` | 从任意文本里抓出第一个版本号（npm `semver.coerce`）：`"node v18.16.1"` → 18.16.1、`"42"` → 42.0.0、`"1.2"` → 1.2.0、`"x.y.z"` → 没有版本；文本里的预发布/build 元数据按 npm 默认丢弃 |
 | `semver_outside` | 版本相对**整个范围**的位置（npm `semver.gtr`/`semver.ltr`）：高于全部、低于全部、在范围内、落在分支之间的空隙——回答「太新还是太旧」，这是 `semver_satisfies` 单独答不了的 |
+| `semver_explain` | **为什么**满足/不满足：把每个 `||` 分支展开成 npm 真正会用的比较符，逐条给出接受/拒绝与决定它的优先级关系，并把预发布的 tuple-lock 与「边界没过」分开报 |
+
+### semver_explain 讲原因而不只给结论（v0.5.0）
+
+```
+semver_explain("1.2.3-beta.1", ">=1.0.0")
+  → 不满足
+    原因：">=1.0.0" 的每个比较符都通过，但被 npm 的预发布规则拒绝——
+          候选是预发布，而该分支没有任何比较符钉住 1.2.3-x（tuple-lock）
+
+semver_explain("0.2.1-rc.2", ">=0.2.1-rc.3 <0.3.0-0")
+  → 不满足
+    原因：最接近的分支里 2 个比较符有 1 个拒绝：
+          >=0.2.1-rc.3（0.2.1-rc.2 低于 0.2.1-rc.3）
+
+semver_explain("2.0.0", "^1.0.0 || ^3.0.0")
+  → 不满足
+    原因：最接近的分支 "<2.0.0-0 >=1.0.0" 2 个比较符里 1 个拒绝：…
+```
+
+- **「不满足」本身不是答案**：同一个结论可能意味着「差一个 patch」、「高了一整个大版本」，或「预发布永远匹配不上普通范围」。解释把这三种情形拆开，按分支、按比较符给出。
+- **比较符形状是 npm 的，不是匹配器的**：匹配器内部用 `<2.0.0` 并靠 tuple-lock 兜住预发布，而 npm 的 `Range.set` 会生成 `<2.0.0-0`。解释报的是解析器真正会用的形状，所以 `^1.2.3` 显示为 `>=1.2.3 <2.0.0-0`。
+- **tuple-lock 就说是锁**：当所有比较符都接受一个预发布候选时，工具会明说这一点，并指出能放行的钉法（`1.2.3-0`），不会假装是边界没过。
+- **多个分支分别解释，不合并**：带 `||` 时逐个分支解释并给出「最接近」的那个；「最接近」按被拒比较符最少来定，于是「只差一个上界」不会被说成「差两个边界」。
 
 ### semver_coerce / semver_outside 文本与定位（v0.4.0）
 
@@ -96,7 +120,7 @@ dsh plugin --profile web add github:TYEclipse/dsh-semver
 
 ## 安全性
 
-十个工具全部**纯函数、离线**：无网络、无文件系统访问、无 shell、无动态求值。
+十一个工具全部**纯函数、离线**：无网络、无文件系统访问、无 shell、无动态求值。
 
 ## 测试锚点
 
@@ -104,10 +128,10 @@ dsh plugin --profile web add github:TYEclipse/dsh-semver
 
 ```
 test/oracle/range-algebra-oracle.mjs   # 由 npm semver 重新生成锚点（--write 写盘 / --check 自检）
-test/anchors/range-algebra.json        # 54 个范围 · 400 组范围对 · 864 条匹配用例 · 28 条 coerce 用例 · 864 条 gtr/ltr 用例
+test/anchors/range-algebra.json        # 54 个范围 · 400 组范围对 · 864 条匹配用例 · 28 条 coerce 用例 · 864 条 gtr/ltr 用例 · 11 条解释用例
 ```
 
-装上 `semver@7` 后执行 `node test/oracle/range-algebra-oracle.mjs --write` 即可重写锚点；测试会拿本插件的匹配器、`semver_min_version`、`semver_intersects`、`semver_coerce`、`semver_outside` 以及 npm 形状的比较符解析逐条对拍。v0.3.0 修掉的 `~1.2.3` 下界 bug 正是这样被抓出来的——它旧用例里的期望值是人手写的，恰好落在了错误的边界之外。
+装上 `semver@7` 后执行 `node test/oracle/range-algebra-oracle.mjs --write` 即可重写锚点；测试会拿本插件的匹配器、`semver_min_version`、`semver_intersects`、`semver_coerce`、`semver_outside`、`semver_explain` 以及 npm 形状的比较符解析逐条对拍。v0.3.0 修掉的 `~1.2.3` 下界 bug 正是这样被抓出来的——它旧用例里的期望值是人手写的，恰好落在了错误的边界之外。
 
 oracle 自带自检（`--check`）：用 npm 重新推导全部锚点并与提交件逐字节比对，同时跑内部不变量（`gtr` 不与 `satisfies` 同时为真、`intersects` 对称、语料覆盖四种定位结局）。它挂在本仓测试门禁里，所以「标记指向的脚本存在」不会被误当成「锚点还成立」。这些不变量里有一条最初就写错了——它断言「一个版本不可能同时高于和低于某个范围」，语料当场证明 npm 对 tuple-lock 的预发布**真的**会这么判。
 

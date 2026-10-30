@@ -111,6 +111,26 @@ const COERCE_INPUTS = [
 /** Inputs whose first number run is beyond what npm can represent (> MAX_SAFE_INTEGER). */
 const COERCE_UNREPRESENTABLE_INPUTS = ['v9999999999999999', '9999999999999999.1.1']
 
+/**
+ * Pairs whose *explanation* is anchored (v0.5.0 `semver_explain`): the point of
+ * the tool is the distinction between "a bound was missed" and "the prerelease
+ * tuple-lock rejected it", so the corpus has to contain both, plus OR
+ * alternatives and a hyphen range.
+ */
+const EXPLAIN_CASES = [
+  ['1.2.3-beta.1', '>=1.0.0'],
+  ['1.2.3-beta.1', '>=1.2.3-0'],
+  ['1.2.3', '^1.2.3'],
+  ['1.2.0', '^1.2.3'],
+  ['0.2.1-rc.2', '>=0.2.1-rc.3 <0.3.0-0'],
+  ['2.0.0', '^1.0.0 || ^3.0.0'],
+  ['2.0.0', '^1.0.0 || ^2.0.0'],
+  ['2.0.0-0', '^1.0.0 || ^2.0.0'],
+  ['1.2.3+build.5', '1.2.3 - 2.3.4'],
+  ['0.0.0-0', '>=0.0.1'],
+  ['1.2.4', '>1.2.3 <1.2.4'],
+]
+
 function deriveAnchors(semver, oracleVersion) {
   const minVersions = {}
   for (const range of RANGES) {
@@ -152,6 +172,37 @@ function deriveAnchors(semver, oracleVersion) {
     }
   }
 
+  // v0.5.0: the explanation anchors. Comparator verdicts come from npm's own
+  // Comparator.test (which applies NO prerelease rule), and the tuple-lock is
+  // derived from npm's comparator objects — so `satisfied` here is npm's
+  // Range.test and the per-comparator truth is npm's, independently of how the
+  // plugin splits the two. Labels are sorted so both sides read one order.
+  const explain = []
+  for (const [version, range] of EXPLAIN_CASES) {
+    const candidate = new semver.SemVer(version)
+    const tuple = `${candidate.major}.${candidate.minor}.${candidate.patch}`
+    const parsedRange = new semver.Range(range)
+    const sets = parsedRange.set.map((comparators) => {
+      const verdicts = []
+      let pinnedTuple = null
+      for (const comparator of comparators) {
+        if (comparator.semver === semver.Comparator.ANY) continue
+        const label = `${comparator.operator}${comparator.semver.version}`
+        verdicts.push([label, comparator.test(version)])
+        const sameTuple = `${comparator.semver.major}.${comparator.semver.minor}.${comparator.semver.patch}` === tuple
+        if (sameTuple && comparator.semver.prerelease.length > 0 && pinnedTuple === null) pinnedTuple = tuple
+      }
+      verdicts.sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      return {
+        label: verdicts.length === 0 ? '*' : verdicts.map(([label]) => label).join(' '),
+        comparators: verdicts,
+        prereleaseAllowed: candidate.prerelease.length === 0 || pinnedTuple !== null,
+        pinnedTuple,
+      }
+    })
+    explain.push([version, range, parsedRange.test(version), sets])
+  }
+
   return {
     oracle: { name: 'semver', version: oracleVersion, source: 'npm semver (independent reference implementation)' },
     corpus: {
@@ -160,6 +211,7 @@ function deriveAnchors(semver, oracleVersion) {
       versionCount: VERSIONS.length,
       coerceCount: coerce.length,
       outsideCount: outside.length,
+      explainCount: explain.length,
     },
     minVersions,
     rangeSets,
@@ -167,6 +219,7 @@ function deriveAnchors(semver, oracleVersion) {
     satisfies,
     coerce,
     outside,
+    explain,
   }
 }
 
@@ -190,6 +243,12 @@ function printAnchors(anchors) {
   }
   for (const [range, version, above, below] of anchors.outside) {
     console.log(`outside ${JSON.stringify(version)} ${JSON.stringify(range)} -> above=${above} below=${below}`)
+  }
+  for (const [version, range, satisfied, sets] of anchors.explain) {
+    const shapes = sets
+      .map((set) => `${set.label}${set.prereleaseAllowed ? '' : ' [tuple-lock]'}${set.comparators.every(([, ok]) => ok) ? '' : ' [bound missed]'}`)
+      .join(' || ')
+    console.log(`explain ${JSON.stringify(version)} ${JSON.stringify(range)} -> satisfied=${satisfied} ${shapes}`)
   }
   console.log(`# corpus: ${JSON.stringify(anchors.corpus)}`)
 }
@@ -251,6 +310,32 @@ function invariantProblems(anchors) {
       problems.push(`intersects: ${a} ∩ ${b} = ${value} but ${b} ∩ ${a} = ${reverse} (not symmetric)`)
     }
   }
+  // The explanation model must reproduce npm's verdict from its own parts:
+  // satisfied ⟺ some alternative has every comparator passing AND the
+  // prerelease rule letting the candidate through. If npm ever disagrees, the
+  // split this tool exposes would be a fiction.
+  let lockOnlyRejections = 0
+  let multiSetCases = 0
+  for (const [version, range, satisfied, sets] of anchors.explain) {
+    if (sets.length > 1) multiSetCases += 1
+    const predicted = sets.some((set) => set.prereleaseAllowed && set.comparators.every(([, ok]) => ok))
+    if (predicted !== satisfied) {
+      problems.push(`explain: ${version} @ ${JSON.stringify(range)} — comparator verdicts + tuple-lock predict ${predicted}, npm says ${satisfied}`)
+    }
+    if (!satisfied && sets.some((set) => !set.prereleaseAllowed && set.comparators.every(([, ok]) => ok))) {
+      lockOnlyRejections += 1
+    }
+    const tupleLockSeen = new Set()
+    for (const set of sets) {
+      const key = set.pinnedTuple
+      if (key !== null && tupleLockSeen.has(key)) problems.push(`explain: ${version} @ ${JSON.stringify(range)} pins ${key} twice`)
+      if (key !== null) tupleLockSeen.add(key)
+    }
+  }
+  if (lockOnlyRejections === 0) {
+    problems.push('explain: the corpus never contains a rejection where every comparator passes (the tuple-lock distinction is the whole tool)')
+  }
+  if (multiSetCases === 0) problems.push('explain: the corpus never contains an OR alternative')
   return problems
 }
 
@@ -285,7 +370,7 @@ function main() {
       for (const problem of problems) console.error(`❌ ${problem}`)
       return 1
     }
-    console.log(`✅ self-check: ${Object.keys(committed.minVersions).length} minVersion, ${Object.keys(committed.intersects).length} intersects, ${committed.satisfies.length} satisfies, ${committed.coerce.length} coerce, ${committed.outside.length} outside anchors re-derived from npm semver ${oracleVersion} and byte-identical`)
+    console.log(`✅ self-check: ${Object.keys(committed.minVersions).length} minVersion, ${Object.keys(committed.intersects).length} intersects, ${committed.satisfies.length} satisfies, ${committed.coerce.length} coerce, ${committed.outside.length} outside, ${committed.explain.length} explain anchors re-derived from npm semver ${oracleVersion} and byte-identical`)
     return 0
   }
 

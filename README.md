@@ -1,6 +1,6 @@
 # dsh-semver
 
-> Semantic versioning toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — parse, compare, range-check, increment, diff, sort, find a range's lowest version, check whether two ranges overlap, pull a version out of messy text and say whether a version is above or below a whole range. Zero runtime dependencies, pure logic, fully deterministic.
+> Semantic versioning toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — parse, compare, range-check, increment, diff, sort, find a range's lowest version, check whether two ranges overlap, pull a version out of messy text, say whether a version is above or below a whole range, and explain *why* one does or does not match. Zero runtime dependencies, pure logic, fully deterministic.
 
 Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11`?", "does `1.2.4-beta.1` satisfy `^1.2.3`?" and "what does `1.2.4-beta.0` + prerelease become?" are exactly the questions LLMs get wrong — prerelease ordering, tuple-lock, caret/tilde upper bounds and prerelease bump rules are easy to misremember. This plugin turns those questions into deterministic tool calls.
 
@@ -18,6 +18,30 @@ Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11
 | `semver_intersects` | Whether two ranges can be satisfied by one version (npm `semver.intersects`) — plus a witness version that satisfies both when they overlap |
 | `semver_coerce` | Pull the first version-like number out of arbitrary text (npm `semver.coerce`): `"node v18.16.1"` → 18.16.1, `"42"` → 42.0.0, `"1.2"` → 1.2.0, `"x.y.z"` → no version. Prerelease/build metadata in the source text are dropped, exactly like npm's default |
 | `semver_outside` | Where a version sits relative to a whole range (npm `semver.gtr` / `semver.ltr`): **above** everything it accepts, **below** everything, **inside**, or in the **gap** between alternatives — the "too new or too old?" question `semver_satisfies` alone cannot answer |
+| `semver_explain` | **Why** a version does or does not satisfy a range: every alternative expanded into npm's comparators, each one accepted/rejected with the precedence that decided it, and the prerelease tuple-lock reported separately from a missed bound |
+
+### semver_explain — the reason, not just the verdict (v0.5.0)
+
+```
+semver_explain("1.2.3-beta.1", ">=1.0.0")
+  → does NOT satisfy
+    why: meets every comparator of ">=1.0.0" but npm's prerelease rule rejects it —
+         the candidate is a prerelease and no comparator pins 1.2.3-x (tuple-lock)
+
+semver_explain("0.2.1-rc.2", ">=0.2.1-rc.3 <0.3.0-0")
+  → does NOT satisfy
+    why: closest alternative rejects 1 of 2 comparators:
+         >=0.2.1-rc.3 (0.2.1-rc.2 is lower than 0.2.1-rc.3)
+
+semver_explain("2.0.0", "^1.0.0 || ^3.0.0")
+  → does NOT satisfy
+    why: closest alternative "<2.0.0-0 >=1.0.0" rejects 1 of 2 comparators: …
+```
+
+- **"Does not satisfy" is not an answer.** The same verdict covers "one patch too old", "a whole major too new", and "a prerelease that no plain range can ever match". The explanation separates them, per alternative, per comparator.
+- **The comparator shape is npm's, not the matcher's.** The matcher compares against `<2.0.0` and relies on the tuple-lock; npm's `Range.set` builds `<2.0.0-0`. The explanation reports what a resolver actually builds, which is why `^1.2.3` shows up as `>=1.2.3 <2.0.0-0`.
+- **The tuple-lock is named as a lock.** When every comparator accepts a prerelease candidate, the tool says so and points at the pin that would let it through (`1.2.3-0`) instead of pretending a bound was missed.
+- **Several alternatives are compared, not merged.** With `||` each branch is explained and the closest one is reported; "closest" means "fewest rejected comparators", so a `2.0.0` that fails only the upper bound of one branch is not confused with a `2.0.0` that fails both bounds.
 
 ### semver_coerce / semver_outside — text and position (v0.4.0)
 
@@ -134,7 +158,7 @@ semver_intersects("^1.2.3", ">=1.3.0 <1.5.0")
 
 ## Safety
 
-All ten tools are **pure and offline**: no network, no filesystem access, no shell, no dynamic evaluation. Inputs are validated with strict regexes and numeric checks; malformed versions, ranges and identifiers return explicit reasons instead of throwing.
+All eleven tools are **pure and offline**: no network, no filesystem access, no shell, no dynamic evaluation. Inputs are validated with strict regexes and numeric checks; malformed versions, ranges and identifiers return explicit reasons instead of throwing.
 
 ## Testing
 
@@ -146,10 +170,10 @@ Tool semantics are anchored to **npm's own semver package** as an independent or
 
 ```
 test/oracle/range-algebra-oracle.mjs   # regenerates the anchors from npm semver
-test/anchors/range-algebra.json        # 54 ranges · 400 range pairs · 864 matcher cases · 28 coerce cases · 864 gtr/ltr cases
+test/anchors/range-algebra.json        # 54 ranges · 400 range pairs · 864 matcher cases · 28 coerce cases · 864 gtr/ltr cases · 11 explanation cases
 ```
 
-With `npm i semver@7` available, `node test/oracle/range-algebra-oracle.mjs --write` rewrites the anchors; the test suite sweeps the plugin's matcher, `semver_min_version`, `semver_intersects`, `semver_coerce`, `semver_outside` and the npm-shaped comparator parser against every one of them. The `~1.2.3` lower-bound bug fixed in v0.3.0 was found exactly this way — its v0.2.x expectation had been chosen by hand and sat outside the wrong bound.
+With `npm i semver@7` available, `node test/oracle/range-algebra-oracle.mjs --write` rewrites the anchors; the test suite sweeps the plugin's matcher, `semver_min_version`, `semver_intersects`, `semver_coerce`, `semver_outside`, `semver_explain` and the npm-shaped comparator parser against every one of them. The `~1.2.3` lower-bound bug fixed in v0.3.0 was found exactly this way — its v0.2.x expectation had been chosen by hand and sat outside the wrong bound.
 
 The oracle also carries a self-check (`node test/oracle/range-algebra-oracle.mjs --check`) that re-derives every anchor from npm and requires byte equality with the committed file, plus internal invariants (`gtr` never agrees with `satisfies`, `intersects` is symmetric, the corpus yields all four placement outcomes). It runs as part of this repo's test gate, so "the marker points at a script that exists" is never mistaken for "the anchors are still true". One of those invariants was itself wrong when first written — it claimed a version can never be both above and below a range, and the corpus immediately showed npm really does that for tuple-locked prereleases.
 

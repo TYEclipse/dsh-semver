@@ -1,7 +1,7 @@
 /**
  * dsh-semver — semantic versioning toolbox for DeepSeek Harness.
  *
- * Eleven deterministic tools, zero runtime dependencies (pure logic):
+ * Twelve deterministic tools, zero runtime dependencies (pure logic):
  *   semver_parse        — parse a version string into major/minor/patch/prerelease/build
  *   semver_compare      — compare two versions (lt / eq / gt) with a human verdict
  *   semver_satisfies    — check a version against an npm-style range (^ ~ >= <= > < = x-ranges, hyphen, ||, AND)
@@ -13,6 +13,7 @@
  *   semver_coerce       — pull the first version-like number out of arbitrary text (npm semver.coerce parity)
  *   semver_outside      — is a version above / below / inside a whole range (npm semver.gtr / semver.ltr parity)
  *   semver_explain      — why a version does (not) match: per-alternative, per-comparator, tuple-lock split out
+ *   semver_subset       — is every version one range accepts also accepted by another, with a witness when not
  *
  * Semantics follow the Semantic Versioning 2.0.0 spec and npm's range behavior;
  * the range matcher, minimum-version, intersection, coerce and outside logic are

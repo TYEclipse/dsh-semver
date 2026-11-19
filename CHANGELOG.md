@@ -2,6 +2,15 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-semver`
 
+## [0.6.0] — 2026-11-20
+### Minor · R105
+- **新增第十二个工具 `semver_subset`**：一个范围接受的**每一个**版本是否都被另一个范围接受（npm `semver.subset` 的问题）。回答用**集合包含**：每个 `||` 分支先化成区间（`lo`/`hi` 端点 + 开闭），再按 npm 的预发布规则拆成若干「层」——正式版一层，每个被比较符钉住的 `[major,minor,patch]` 元组各一层；子集成立 ⟺ 子范围每个区间都被父范围同层区间覆盖。答「否」时给出**见证版本**：一个子范围接受、父范围拒绝的具体版本，返回前用 `satisfiesRange` 两侧复校（间隔算术写错时宁可报内部不一致，也不给一个不该被信任的见证）。
+- **三个诚实契约**：① `emptySubset` 显式区分「空范围是任何范围的子集」——`<0.0.0-0` 什么都不接受，`>1.0.0 <1.0.1` 也什么都不接受（两界之间没有正式版，`1.0.1` 的预发布被 tuple-lock 挡住）；② 答案为「是」时 `witness` 字段**缺席**（不是 null）；③ 范围不可解析时 `valid: false` + 原因，不猜。
+- **刻意比 npm 的 `semver.subset()` 严格，并把分歧量出来**：npm 比较的是比较符**边界**，于是 `subset(">=2.0.0 <3.0.0", "^2")` 答 `false`——两个范围其实接受完全相同的正式版，差别只在 `<3.0.0` 与 `<3.0.0-0`；`subset("1.2.3-beta", ">=1.2.3-0 <1.2.4")` 同样被误答 `false`（父范围确实钉住了该元组）。本工具答 `true`，并把 npm 的答案一起记进锚点（`npmSubset`），分歧是测出来的事实而不是注释里的说法。工具描述里写明了这一点，免得读者以为是在复刻 npm 的缺陷。
+- **期望值出处**：`test/oracle/range-algebra-oracle.mjs` 新增 `subset` 区——25 个范围的全序对（625 条），由 npm 自己的 `Range.test` 在**探针格**上判定（每个端点 × 它的正式版/`-0`/`-alpha`/`-beta`/三种进位形态），"不是子集" ⟺ 某个探针满足前者而不满足后者，该探针即见证。自检新增四条不变量：自反性、两种结论都出现、每条「否」都带见证、以及「npm 至少在一处与集合答案不同」（否则工具描述里的分歧说明就成了陈旧说法）。
+- 测试 **198 → 214**（新增 `test/subset.test.ts` 23 条 + 渲染器覆盖 15 条：625 对逐条对拍、每一条「否」的见证都用匹配器复校、13 条命名用例含空范围/单元素空隙/预发布钉住/同一元组的两个分支、工具面 `witness` 缺席契约、错误范围拒绝），覆盖率 **93.41% → 96.36%**（基线棘轮上调；顺带把此前从未被执行过的渲染器（parse/compare/satisfies/inc/diff/sort/min_version）纳入测试——渲染文本是模型唯一看到的东西）。
+- 说明与 topics 复核：`package.json` 描述补 range algebra / subset，topics +`range-subset`/`containment`；README 双语补 `semver_subset` 小节（12 个工具）、`src/index.ts` 与 `tools.ts` 的「eleven tools」docstring 同步改正。
+
 ## [0.5.0] — 2026-10-31
 ### Minor · R85
 - [自主进化] R85 新增 semver_explain（逐比较符解释 + tuple-lock 与边界未过分开报；解释用 npm 的 Range.set 形状）

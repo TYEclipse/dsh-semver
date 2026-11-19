@@ -131,6 +131,62 @@ const EXPLAIN_CASES = [
   ['1.2.4', '>1.2.3 <1.2.4'],
 ]
 
+/**
+ * Ranges used for the v0.6.0 subset matrix (all pairs, so N² anchors). Chosen so
+ * that both outcomes occur and the hard cases are present: equivalent spellings
+ * (`>=2.0.0 <3.0.0` vs `^2`), empty ranges (`<0.0.0-0`), one-element gaps
+ * (`>1.0.0 <1.0.1`), prerelease pins, OR alternatives, and hyphen ranges.
+ */
+const SUBSET_RANGES = [
+  '*', '^1.0.0', '^1.2.0', '^1.2.3', '~1.2.3', '^0.0.1', '^0.1.0', '^0.1.2', '^2',
+  '1.2.3', '1.2.3 || 1.2.4', '>=1.0.0', '>1.0.0', '<2.0.0', '>=1.0.0 <2.0.0',
+  '>=1.2.3 <2.0.0-0', '1.x', '1.2.3 - 1.2.5', '<0.0.0-0', '>1.0.0 <1.0.1',
+  '^1.2.3-beta', '^1.2.3 || ^3.0.0', '>=2.0.0 <3.0.0', '1.0.0 || 1.0.1',
+  '>=1.0.0 <1.0.2',
+]
+
+/**
+ * The probe lattice for subset: every endpoint either range mentions, plus the
+ * neighbouring versions that could hold a counter-example. This is the part that
+ * makes the oracle independent of the plugin — the answer is "does any probe
+ * satisfy one range and not the other", decided by npm's own `Range.test`.
+ */
+function buildSubsetProbes(semver, ranges) {
+  const found = new Map()
+  const remember = (text) => {
+    const parsed = semver.parse(text)
+    if (parsed !== null) found.set(parsed.version, parsed)
+  }
+  for (const text of ['0.0.0', '0.0.0-0', '1.0.0', '2.0.0', '2.0.0-0', '3.0.0']) remember(text)
+  for (const range of ranges) {
+    for (const set of new semver.Range(range).set) {
+      for (const comparator of set) {
+        if (comparator.semver === semver.Comparator.ANY) continue
+        const v = comparator.semver
+        const tuple = `${v.major}.${v.minor}.${v.patch}`
+        const forms = [
+          v.version,
+          tuple,
+          `${tuple}-0`,
+          `${tuple}-alpha`,
+          `${tuple}-beta`,
+          `${tuple}-alpha.0`,
+          `${tuple}-beta.1`,
+          `${tuple}-0.0`,
+          `${v.major}.${v.minor}.${v.patch + 1}`,
+          `${v.major}.${v.minor}.${v.patch + 1}-0`,
+          `${v.major}.${v.minor + 1}.0`,
+          `${v.major}.${v.minor + 1}.0-0`,
+          `${v.major + 1}.0.0`,
+          `${v.major + 1}.0.0-0`,
+        ]
+        for (const form of forms) remember(form)
+      }
+    }
+  }
+  return [...found.values()].sort((a, b) => a.compare(b))
+}
+
 function deriveAnchors(semver, oracleVersion) {
   const minVersions = {}
   for (const range of RANGES) {
@@ -203,6 +259,30 @@ function deriveAnchors(semver, oracleVersion) {
     explain.push([version, range, parsedRange.test(version), sets])
   }
 
+  // v0.6.0: subset anchors. The authority is npm's `Range.test` over a bounded
+  // probe lattice built from every endpoint either range mentions (the endpoint
+  // itself, its release form, its `-0`/`-alpha`/`-beta` forms, and the three
+  // next version bumps): a pair is *not* a subset iff some probe satisfies sub
+  // and not dom, and that probe is the witness.
+  //
+  // Deliberately NOT npm's own `semver.subset()`: it answers false for genuine
+  // subsets (it compares comparator bounds rather than the accepted sets —
+  // `subset('>=2.0.0 <3.0.0', '^2')` is false even though both accept exactly
+  // the same releases). `subsetNpm` is recorded anyway, so the divergence is a
+  // visible fact rather than a surprise.
+  const subsetProbes = buildSubsetProbes(semver, SUBSET_RANGES)
+  const subset = { ranges: SUBSET_RANGES, probes: subsetProbes.map((v) => v.version), verdicts: [], witnesses: [], npmSubset: [] }
+  for (const sub of SUBSET_RANGES) {
+    const subRange = new semver.Range(sub)
+    for (const dom of SUBSET_RANGES) {
+      const domRange = new semver.Range(dom)
+      const witness = subsetProbes.find((v) => subRange.test(v) && !domRange.test(v))
+      subset.verdicts.push(witness === undefined)
+      subset.witnesses.push(witness === undefined ? null : witness.version)
+      subset.npmSubset.push(semver.subset(sub, dom))
+    }
+  }
+
   return {
     oracle: { name: 'semver', version: oracleVersion, source: 'npm semver (independent reference implementation)' },
     corpus: {
@@ -212,6 +292,8 @@ function deriveAnchors(semver, oracleVersion) {
       coerceCount: coerce.length,
       outsideCount: outside.length,
       explainCount: explain.length,
+      subsetRangeCount: SUBSET_RANGES.length,
+      subsetProbeCount: subsetProbes.length,
     },
     minVersions,
     rangeSets,
@@ -220,6 +302,7 @@ function deriveAnchors(semver, oracleVersion) {
     coerce,
     outside,
     explain,
+    subset,
   }
 }
 
@@ -249,6 +332,17 @@ function printAnchors(anchors) {
       .map((set) => `${set.label}${set.prereleaseAllowed ? '' : ' [tuple-lock]'}${set.comparators.every(([, ok]) => ok) ? '' : ' [bound missed]'}`)
       .join(' || ')
     console.log(`explain ${JSON.stringify(version)} ${JSON.stringify(range)} -> satisfied=${satisfied} ${shapes}`)
+  }
+  const n = anchors.subset.ranges.length
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      const k = i * n + j
+      const verdict = anchors.subset.verdicts[k]
+      const witness = anchors.subset.witnesses[k]
+      console.log(
+        `subset ${JSON.stringify(anchors.subset.ranges[i])} ⊆ ${JSON.stringify(anchors.subset.ranges[j])} -> ${verdict}${witness === null ? '' : ` (witness ${witness})`}${anchors.subset.npmSubset[k] === verdict ? '' : ' [npm.subset() disagrees]'}`,
+      )
+    }
   }
   console.log(`# corpus: ${JSON.stringify(anchors.corpus)}`)
 }
@@ -336,6 +430,36 @@ function invariantProblems(anchors) {
     problems.push('explain: the corpus never contains a rejection where every comparator passes (the tuple-lock distinction is the whole tool)')
   }
   if (multiSetCases === 0) problems.push('explain: the corpus never contains an OR alternative')
+  // Subset matrix invariants: reflexivity, both outcomes present, and every
+  // "not a subset" entry carrying a witness (a null witness with a false verdict
+  // would mean the oracle lost the counter-example it just found).
+  const subset = anchors.subset
+  if (subset === undefined) {
+    problems.push('subset: section missing')
+    return problems
+  }
+  const n = subset.ranges.length
+  if (subset.verdicts.length !== n * n || subset.witnesses.length !== n * n || subset.npmSubset.length !== n * n) {
+    problems.push(`subset: matrix size ${subset.verdicts.length}/${subset.witnesses.length}/${subset.npmSubset.length} does not match ${n}×${n}`)
+  }
+  for (let i = 0; i < n; i += 1) {
+    if (subset.verdicts[i * n + i] !== true) problems.push(`subset: ${subset.ranges[i]} is not a subset of itself`)
+  }
+  if (!subset.verdicts.includes(true) || !subset.verdicts.includes(false)) problems.push('subset: the matrix only contains one outcome')
+  let diverged = 0
+  for (let i = 0; i < subset.verdicts.length; i += 1) {
+    const verdict = subset.verdicts[i]
+    const witness = subset.witnesses[i]
+    if (verdict === true && witness !== null) problems.push(`subset: entry ${i} is a subset yet carries witness ${witness}`)
+    if (verdict === false && witness === null) problems.push(`subset: entry ${i} is not a subset but the witness was lost`)
+    if (subset.npmSubset[i] !== verdict) diverged += 1
+    if (subset.npmSubset[i] === true && verdict === false) {
+      problems.push(`subset: entry ${i} — set search found witness ${witness} but npm.subset() says true (npm would be wrong here)`)
+    }
+  }
+  if (diverged === 0) {
+    problems.push('subset: npm.subset() never diverges from the set answer — the documented divergence is not exercised by this corpus')
+  }
   return problems
 }
 
@@ -370,7 +494,7 @@ function main() {
       for (const problem of problems) console.error(`❌ ${problem}`)
       return 1
     }
-    console.log(`✅ self-check: ${Object.keys(committed.minVersions).length} minVersion, ${Object.keys(committed.intersects).length} intersects, ${committed.satisfies.length} satisfies, ${committed.coerce.length} coerce, ${committed.outside.length} outside, ${committed.explain.length} explain anchors re-derived from npm semver ${oracleVersion} and byte-identical`)
+    console.log(`✅ self-check: ${Object.keys(committed.minVersions).length} minVersion, ${Object.keys(committed.intersects).length} intersects, ${committed.satisfies.length} satisfies, ${committed.coerce.length} coerce, ${committed.outside.length} outside, ${committed.explain.length} explain, ${committed.subset.verdicts.length} subset pairs re-derived from npm semver ${oracleVersion} and byte-identical`)
     return 0
   }
 

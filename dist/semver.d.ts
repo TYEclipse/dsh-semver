@@ -289,4 +289,37 @@ export declare function explainRange(version: ParsedVersion, range: string, incl
     ok: false;
     reason: string;
 };
+export type SubsetResult = {
+    subset: boolean;
+    sub: string;
+    dom: string;
+    /** `sub` accepts no version at all (an empty range is a subset of everything). */
+    emptySubset: boolean;
+    subSets: string[];
+    domSets: string[];
+    /** When not a subset: a concrete version `sub` accepts and `dom` rejects. */
+    witness: string | null;
+    because: string;
+};
+/**
+ * Is every version `sub` accepts also accepted by `dom`? (npm's
+ * `semver.subset`, answered by set containment instead of bound comparison.)
+ *
+ * npm's own implementation answers `false` for pairs that really are subsets —
+ * `subset('>=2.0.0 <3.0.0', '^2')` is `false` even though both ranges accept
+ * exactly the same releases, because npm compares the two upper bounds
+ * (`<3.0.0` vs `<3.0.0-0`) instead of the sets. This port compares the sets:
+ * each alternative becomes an interval per lattice level (releases, plus the
+ * prereleases of every tuple a comparator pins), and the answer is
+ * "every span of `sub` is covered by spans of `dom`". When it is not, the first
+ * uncovered span yields a **witness** — a version `sub` accepts and `dom`
+ * rejects — which is re-checked against `satisfiesRange` before it is reported.
+ */
+export declare function rangeSubset(sub: string, dom: string): {
+    ok: true;
+    value: SubsetResult;
+} | {
+    ok: false;
+    reason: string;
+};
 //# sourceMappingURL=semver.d.ts.map

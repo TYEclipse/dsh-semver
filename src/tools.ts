@@ -18,6 +18,7 @@ import {
   normalizeVersion,
   outsideRange,
   parseVersion,
+  rangeSubset,
   rangesIntersect,
   relationLabel,
   satisfiesRange,
@@ -38,6 +39,7 @@ export interface ToolSet {
   semver_coerce: ToolDefinition
   semver_outside: ToolDefinition
   semver_explain: ToolDefinition
+  semver_subset: ToolDefinition
 }
 
 function renderParse(value: unknown): string {
@@ -122,6 +124,24 @@ function renderOutside(value: unknown): string {
   }
 }
 
+function renderSubset(value: unknown): string {
+  const result = value as {
+    valid: boolean
+    sub: string
+    dom: string
+    subset?: boolean
+    emptySubset?: boolean
+    witness?: string
+    because?: string
+    reason?: string
+  }
+  if (!result.valid) return `cannot compare "${result.sub}" with "${result.dom}": ${result.reason ?? 'unknown reason'}`
+  if (result.because !== undefined) return result.because
+  return result.subset === true
+    ? `every version "${result.sub}" accepts is also accepted by "${result.dom}"`
+    : `"${result.sub}" is not a subset of "${result.dom}"`
+}
+
 function renderExplain(value: unknown): string {
   const result = value as {
     valid: boolean
@@ -142,7 +162,7 @@ function renderExplain(value: unknown): string {
   return lines.join('\n')
 }
 
-/** Build all eleven tool definitions from the resolved config. */
+/** Build all twelve tool definitions from the resolved config. */
 export function buildSemverTools(config: ResolvedConfig): ToolSet {
   const semver_parse = defineTool({
     name: 'semver_parse',
@@ -720,5 +740,69 @@ export function buildSemverTools(config: ResolvedConfig): ToolSet {
     },
   })
 
-  return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects, semver_coerce, semver_outside, semver_explain }
+  const semver_subset = defineTool({
+    name: 'semver_subset',
+    description: 'Ask whether every version one range accepts is also accepted by another — the containment question '
+      + 'semver_intersects cannot answer. "Is tightening ^1.0.0 to ^1.2.0 safe?" is subset("^1.2.0", "^1.0.0") = yes; '
+      + '"^1.0.0" against "^1.2.0" is no. Answers by set containment over npm\'s own range semantics (including the '
+      + 'prerelease tuple-lock), and when the answer is no it returns a WITNESS: a concrete version the sub-range accepts '
+      + 'and the dom-range rejects (re-checked on both sides before it is reported). An empty sub-range is a subset of '
+      + 'everything and says so (emptySubset). Note: this is deliberately stricter than npm\'s own semver.subset(), which '
+      + 'reports false for some genuine subsets (e.g. subset(">=2.0.0 <3.0.0", "^2")) because it compares bounds '
+      + 'textually instead of comparing the accepted sets. Deterministic, read-only, no network.',
+    parameters: {
+      sub: { type: 'string', required: true, description: 'The range being contained, e.g. "^1.2.0".' },
+      dom: { type: 'string', required: true, description: 'The range that should contain it, e.g. "^1.0.0".' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          sub: { type: 'string', required: true },
+          dom: { type: 'string', required: true },
+          subset: { type: 'boolean' },
+          emptySubset: { type: 'boolean' },
+          witness: { type: 'string' },
+          subSets: { type: 'array', items: { type: 'string' } },
+          domSets: { type: 'array', items: { type: 'string' } },
+          because: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { sub: string; dom: string }, value: unknown) => [{ type: 'text', text: renderSubset(value) }],
+    },
+    async execute(args: { sub: string; dom: string }) {
+      const result = rangeSubset(args.sub, args.dom)
+      if (!result.ok) return { valid: false, sub: args.sub, dom: args.dom, reason: result.reason }
+      const value = result.value
+      const out: {
+        valid: boolean
+        sub: string
+        dom: string
+        subset: boolean
+        emptySubset: boolean
+        subSets: string[]
+        domSets: string[]
+        because: string
+        witness?: string
+      } = {
+        valid: true,
+        sub: value.sub,
+        dom: value.dom,
+        subset: value.subset,
+        emptySubset: value.emptySubset,
+        subSets: value.subSets,
+        domSets: value.domSets,
+        because: value.because,
+      }
+      // Absent, not null-and-present: `witness` only means something when the
+      // answer is "no" (same honest-contract rule the other tools follow).
+      if (value.witness !== null) out.witness = value.witness
+      return out
+    },
+  })
+
+  return { semver_parse, semver_compare, semver_satisfies, semver_inc, semver_diff, semver_sort, semver_min_version, semver_intersects, semver_coerce, semver_outside, semver_explain, semver_subset }
 }

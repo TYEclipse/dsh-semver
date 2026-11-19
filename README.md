@@ -1,6 +1,6 @@
 # dsh-semver
 
-> Semantic versioning toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — parse, compare, range-check, increment, diff, sort, find a range's lowest version, check whether two ranges overlap, pull a version out of messy text, say whether a version is above or below a whole range, and explain *why* one does or does not match. Zero runtime dependencies, pure logic, fully deterministic.
+> Semantic versioning toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness) — parse, compare, range-check, increment, diff, sort, find a range's lowest version, check whether two ranges overlap, test whether one range contains another, pull a version out of messy text, say whether a version is above or below a whole range, and explain *why* one does or does not match. Zero runtime dependencies, pure logic, fully deterministic.
 
 Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11`?", "does `1.2.4-beta.1` satisfy `^1.2.3`?" and "what does `1.2.4-beta.0` + prerelease become?" are exactly the questions LLMs get wrong — prerelease ordering, tuple-lock, caret/tilde upper bounds and prerelease bump rules are easy to misremember. This plugin turns those questions into deterministic tool calls.
 
@@ -19,6 +19,23 @@ Agents are bad at version arithmetic. "Is `2.1.0-rc.1` newer than `2.1.0-beta.11
 | `semver_coerce` | Pull the first version-like number out of arbitrary text (npm `semver.coerce`): `"node v18.16.1"` → 18.16.1, `"42"` → 42.0.0, `"1.2"` → 1.2.0, `"x.y.z"` → no version. Prerelease/build metadata in the source text are dropped, exactly like npm's default |
 | `semver_outside` | Where a version sits relative to a whole range (npm `semver.gtr` / `semver.ltr`): **above** everything it accepts, **below** everything, **inside**, or in the **gap** between alternatives — the "too new or too old?" question `semver_satisfies` alone cannot answer |
 | `semver_explain` | **Why** a version does or does not satisfy a range: every alternative expanded into npm's comparators, each one accepted/rejected with the precedence that decided it, and the prerelease tuple-lock reported separately from a missed bound |
+| `semver_subset` | Whether **every** version one range accepts is also accepted by another (npm `semver.subset`'s question, answered by set containment): tightening `^1.0.0` to `^1.2.0` is a subset, loosening it is not, and a "no" comes with a **witness** version the sub-range accepts and the dom-range rejects |
+
+### semver_subset — is one range inside another? (v0.6.0)
+
+`semver_intersects` answers "do these two ranges share a version"; `semver_subset` answers the question that actually comes up in review: "if I tighten this range, what would I lose?"
+
+```
+semver_subset("^1.2.0", "^1.0.0")   → every version "^1.2.0" accepts is also accepted by "^1.0.0"
+semver_subset("^1.0.0", "^1.2.3")   → "^1.0.0" accepts 1.0.0, which "^1.2.3" rejects
+semver_subset("<0.0.0-0", "^1.0.0") → accepts no version at all, so it is a subset of everything (emptySubset: true)
+```
+
+Three things are worth knowing:
+
+1. **A witness, not just a verdict.** When the answer is no, the result carries a concrete version that satisfies the sub-range and not the dom-range, re-checked on both sides before it is returned. "Not a subset" without an example is the kind of answer an agent then has to guess about.
+2. **An empty range is a subset of everything** (`emptySubset: true`). `<0.0.0-0` accepts nothing, and `>1.0.0 <1.0.1` accepts nothing either — no release sits between the two bounds, and prereleases of `1.0.1` are tuple-locked out. Both are reported as subsets rather than as mysterious failures.
+3. **This is deliberately stricter than npm's `semver.subset()`.** npm compares comparator *bounds*, so it answers `false` for `subset(">=2.0.0 <3.0.0", "^2")` even though both ranges accept exactly the same releases (`<3.0.0` vs `<3.0.0-0` is the whole difference). This tool compares the *sets*; the divergence is measured in the test anchors (`npmSubset` sits next to every verdict), so it is a recorded fact rather than a claim.
 
 ### semver_explain — the reason, not just the verdict (v0.5.0)
 
@@ -158,7 +175,7 @@ semver_intersects("^1.2.3", ">=1.3.0 <1.5.0")
 
 ## Safety
 
-All eleven tools are **pure and offline**: no network, no filesystem access, no shell, no dynamic evaluation. Inputs are validated with strict regexes and numeric checks; malformed versions, ranges and identifiers return explicit reasons instead of throwing.
+All twelve tools are **pure and offline**: no network, no filesystem access, no shell, no dynamic evaluation. Inputs are validated with strict regexes and numeric checks; malformed versions, ranges and identifiers return explicit reasons instead of throwing.
 
 ## Testing
 
@@ -170,10 +187,10 @@ Tool semantics are anchored to **npm's own semver package** as an independent or
 
 ```
 test/oracle/range-algebra-oracle.mjs   # regenerates the anchors from npm semver
-test/anchors/range-algebra.json        # 54 ranges · 400 range pairs · 864 matcher cases · 28 coerce cases · 864 gtr/ltr cases · 11 explanation cases
+test/anchors/range-algebra.json        # 54 ranges · 400 range pairs · 864 matcher cases · 28 coerce cases · 864 gtr/ltr cases · 11 explanation cases · 625 subset pairs
 ```
 
-With `npm i semver@7` available, `node test/oracle/range-algebra-oracle.mjs --write` rewrites the anchors; the test suite sweeps the plugin's matcher, `semver_min_version`, `semver_intersects`, `semver_coerce`, `semver_outside`, `semver_explain` and the npm-shaped comparator parser against every one of them. The `~1.2.3` lower-bound bug fixed in v0.3.0 was found exactly this way — its v0.2.x expectation had been chosen by hand and sat outside the wrong bound.
+With `npm i semver@7` available, `node test/oracle/range-algebra-oracle.mjs --write` rewrites the anchors; the test suite sweeps the plugin's matcher, `semver_min_version`, `semver_intersects`, `semver_coerce`, `semver_outside`, `semver_explain`, the npm-shaped comparator parser and the whole `semver_subset` matrix (625 ordered pairs, decided by npm's `Range.test` over a probe lattice) against every one of them. The `~1.2.3` lower-bound bug fixed in v0.3.0 was found exactly this way — its v0.2.x expectation had been chosen by hand and sat outside the wrong bound.
 
 The oracle also carries a self-check (`node test/oracle/range-algebra-oracle.mjs --check`) that re-derives every anchor from npm and requires byte equality with the committed file, plus internal invariants (`gtr` never agrees with `satisfies`, `intersects` is symmetric, the corpus yields all four placement outcomes). It runs as part of this repo's test gate, so "the marker points at a script that exists" is never mistaken for "the anchors are still true". One of those invariants was itself wrong when first written — it claimed a version can never be both above and below a range, and the corpus immediately showed npm really does that for tuple-locked prereleases.
 

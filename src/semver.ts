@@ -1117,3 +1117,334 @@ export function explainRange(
 
   return { ok: true, value: { satisfied, normalized, sets, because } }
 }
+
+/* ------------------------------------------------------------------ *
+ * v0.6.0 — semver_subset: set containment between two ranges          *
+ * ------------------------------------------------------------------ */
+
+/** An interval endpoint with its inclusivity. */
+interface Edge {
+  v: ParsedVersion
+  inclusive: boolean
+}
+
+/** The bare interval a comparator AND-set describes, before prerelease gating. */
+interface Interval {
+  lo: Edge | null
+  hi: Edge | null
+}
+
+/** Half-open interval `[start, end)` inside one level of the version lattice. */
+interface Span {
+  start: ParsedVersion | null
+  end: ParsedVersion | null
+}
+
+/** The smallest release version — stands in for "no lower bound" on the release level. */
+const MIN_RELEASE: ParsedVersion = { major: 0, minor: 0, patch: 0, prerelease: null, build: null }
+
+/** Compare `[major, minor, patch]` only (prerelease ignored). */
+function cmpTuple(a: ParsedVersion, b: ParsedVersion): number {
+  if (a.major !== b.major) return a.major < b.major ? -1 : 1
+  if (a.minor !== b.minor) return a.minor < b.minor ? -1 : 1
+  if (a.patch !== b.patch) return a.patch < b.patch ? -1 : 1
+  return 0
+}
+
+/** Strip the prerelease (the release version of the same tuple). */
+function releaseOf(v: ParsedVersion): ParsedVersion {
+  return { major: v.major, minor: v.minor, patch: v.patch, prerelease: null, build: null }
+}
+
+/** The release immediately after a release version. */
+function nextPatch(v: ParsedVersion): ParsedVersion {
+  return { major: v.major, minor: v.minor, patch: v.patch + 1, prerelease: null, build: null }
+}
+
+/**
+ * The prerelease immediately after another prerelease of the same tuple:
+ * appending `.0` always yields the smallest identifier list above it
+ * (`1.0.0-alpha < 1.0.0-alpha.0 < 1.0.0-alpha.1`). A release has no successor
+ * *inside* its prerelease chain, hence `null`.
+ */
+function nextPrerelease(v: ParsedVersion): ParsedVersion | null {
+  if (v.prerelease === null) return null
+  return { major: v.major, minor: v.minor, patch: v.patch, prerelease: [...v.prerelease, '0'], build: null }
+}
+
+/** Collapse a comparator set into one interval (bounds only; the tuple-lock is applied later).
+ *
+ * `parseRangeSets` (the matcher shape) never emits a bare comparator — an exact
+ * version arrives as the pair `[<=, >=]` — so `op` is one of the four ordered
+ * comparators here. A bare `''` comparator would mean an exact version, and
+ * silently ignoring its upper bound would make the subset answer too permissive;
+ * the type still allows it, so it is handled as a point.
+ */
+function intervalOfComparators(comparators: readonly Comparator[]): Interval {
+  let lo: Edge | null = null
+  let hi: Edge | null = null
+  const raise = (e: Edge): void => {
+    if (lo === null) {
+      lo = e
+      return
+    }
+    const d = compareVersions(e.v, lo.v)
+    if (d > 0 || (d === 0 && !e.inclusive)) lo = e
+  }
+  const lower = (e: Edge): void => {
+    if (hi === null) {
+      hi = e
+      return
+    }
+    const d = compareVersions(e.v, hi.v)
+    if (d < 0 || (d === 0 && !e.inclusive)) hi = e
+  }
+  for (const c of comparators) {
+    switch (c.op) {
+      case '':
+        raise({ v: c.version, inclusive: true })
+        lower({ v: c.version, inclusive: true })
+        break
+      case '>=':
+        raise({ v: c.version, inclusive: true })
+        break
+      case '>':
+        raise({ v: c.version, inclusive: false })
+        break
+      case '<=':
+        lower({ v: c.version, inclusive: true })
+        break
+      case '<':
+        lower({ v: c.version, inclusive: false })
+        break
+    }
+  }
+  return { lo, hi }
+}
+
+/** The interval restricted to release versions, as a half-open span. */
+function releaseSpan(iv: Interval): Span {
+  const lo = iv.lo
+  const hi = iv.hi
+  const start =
+    lo === null
+      ? null
+      : lo.v.prerelease !== null
+        ? releaseOf(lo.v) // releases >= 1.2.3-x all start at 1.2.3
+        : lo.inclusive
+          ? releaseOf(lo.v)
+          : nextPatch(lo.v)
+  const end =
+    hi === null
+      ? null
+      : hi.v.prerelease !== null
+        ? releaseOf(hi.v) // releases < 1.2.3-x are releases < 1.2.3
+        : hi.inclusive
+          ? nextPatch(hi.v)
+          : releaseOf(hi.v)
+  return { start, end }
+}
+
+/**
+ * The interval restricted to **prereleases of one tuple** — npm's tuple-lock
+ * only ever admits a prerelease when a comparator pins its exact tuple, so each
+ * pinned tuple is a separate slice of the satisfying set. Returns `null` when
+ * the slice is empty.
+ */
+function prereleaseSpan(iv: Interval, tuple: ParsedVersion): Span | null {
+  const lo = iv.lo
+  const hi = iv.hi
+  let start: ParsedVersion | null
+  if (lo === null) start = null
+  else {
+    const d = cmpTuple(lo.v, tuple)
+    if (d > 0) return null
+    if (d < 0) start = null
+    else if (lo.v.prerelease === null) return null // lower bound is the release itself: nothing below it in the chain
+    else start = lo.inclusive ? lo.v : nextPrerelease(lo.v)
+  }
+  let end: ParsedVersion
+  if (hi === null) end = releaseOf(tuple) // the release itself is NOT a prerelease
+  else {
+    const d = cmpTuple(hi.v, tuple)
+    if (d < 0) return null
+    if (d > 0 || hi.v.prerelease === null) end = releaseOf(tuple)
+    else end = hi.inclusive ? (nextPrerelease(hi.v) as ParsedVersion) : hi.v
+  }
+  return { start, end }
+}
+
+/** Is a half-open span empty, given the smallest element of its level? */
+function spanEmpty(span: Span, floor: ParsedVersion): boolean {
+  const start = span.start ?? floor
+  if (span.end === null) return false
+  return compareVersions(start, span.end) >= 0
+}
+
+/** `piece \ cover` — at most two pieces, empties dropped. */
+function subtractSpan(piece: Span, cover: Span, floor: ParsedVersion): Span[] {
+  const ps = piece.start ?? floor
+  const cs = cover.start ?? floor
+  const overlaps =
+    (piece.end === null || compareVersions(cs, piece.end) < 0) &&
+    (cover.end === null || compareVersions(cover.end, ps) > 0)
+  if (!overlaps) return [piece]
+  const out: Span[] = []
+  if (cover.start !== null) {
+    const left: Span = { start: piece.start, end: cover.start }
+    if (!spanEmpty(left, floor)) out.push(left)
+  }
+  if (cover.end !== null) {
+    const right: Span = { start: cover.end, end: piece.end }
+    if (!spanEmpty(right, floor)) out.push(right)
+  }
+  return out
+}
+
+/** Subtract every cover from one piece; what is left is the uncovered part. */
+function uncoveredBy(piece: Span, covers: readonly Span[], floor: ParsedVersion): Span[] {
+  let remaining: Span[] = [piece]
+  for (const cover of covers) {
+    const next: Span[] = []
+    for (const span of remaining) next.push(...subtractSpan(span, cover, floor))
+    remaining = next
+    if (remaining.length === 0) break
+  }
+  return remaining
+}
+
+/** One level of a range's satisfying set: release versions, or prereleases of one tuple. */
+interface Level {
+  tuple: ParsedVersion | null
+  floor: ParsedVersion
+  spans: Span[]
+}
+
+function levelsOf(sets: readonly Comparator[][]): Level[] {
+  const release: Level = { tuple: null, floor: MIN_RELEASE, spans: [] }
+  const prerelease = new Map<string, Level>()
+  for (const comparators of sets) {
+    const iv = intervalOfComparators(comparators)
+    release.spans.push(releaseSpan(iv))
+    const pinned = new Map<string, ParsedVersion>()
+    for (const c of comparators) {
+      if (c.version.prerelease !== null) pinned.set(tupleOf(c.version), c.version)
+    }
+    for (const [key, tuple] of pinned) {
+      const span = prereleaseSpan(iv, tuple)
+      if (span === null) continue
+      const existing = prerelease.get(key)
+      if (existing === undefined) {
+        const floor: ParsedVersion = { major: tuple.major, minor: tuple.minor, patch: tuple.patch, prerelease: ['0'], build: null }
+        prerelease.set(key, { tuple, floor, spans: [span] })
+      } else {
+        existing.spans.push(span)
+      }
+    }
+  }
+  return [release, ...prerelease.values()]
+}
+
+export type SubsetResult = {
+  subset: boolean
+  sub: string
+  dom: string
+  /** `sub` accepts no version at all (an empty range is a subset of everything). */
+  emptySubset: boolean
+  subSets: string[]
+  domSets: string[]
+  /** When not a subset: a concrete version `sub` accepts and `dom` rejects. */
+  witness: string | null
+  because: string
+}
+
+/**
+ * Is every version `sub` accepts also accepted by `dom`? (npm's
+ * `semver.subset`, answered by set containment instead of bound comparison.)
+ *
+ * npm's own implementation answers `false` for pairs that really are subsets —
+ * `subset('>=2.0.0 <3.0.0', '^2')` is `false` even though both ranges accept
+ * exactly the same releases, because npm compares the two upper bounds
+ * (`<3.0.0` vs `<3.0.0-0`) instead of the sets. This port compares the sets:
+ * each alternative becomes an interval per lattice level (releases, plus the
+ * prereleases of every tuple a comparator pins), and the answer is
+ * "every span of `sub` is covered by spans of `dom`". When it is not, the first
+ * uncovered span yields a **witness** — a version `sub` accepts and `dom`
+ * rejects — which is re-checked against `satisfiesRange` before it is reported.
+ */
+export function rangeSubset(
+  sub: string,
+  dom: string,
+): { ok: true; value: SubsetResult } | { ok: false; reason: string } {
+  const subParsed = parseRangeSets(sub)
+  if (!subParsed.ok) return subParsed
+  const domParsed = parseRangeSets(dom)
+  if (!domParsed.ok) return domParsed
+
+  const subLevels = levelsOf(subParsed.sets)
+  const domLevels = levelsOf(domParsed.sets)
+  const uncovered: { span: Span; floor: ParsedVersion }[] = []
+  let emptySubset = true
+
+  for (const level of subLevels) {
+    const live = level.spans.filter((s) => !spanEmpty(s, level.floor))
+    if (live.length === 0) continue
+    emptySubset = false
+    const covers = domLevels
+      .filter((d) => (d.tuple === null ? level.tuple === null : level.tuple !== null && tupleOf(d.tuple) === tupleOf(level.tuple)))
+      .flatMap((d) => d.spans)
+      .filter((s) => !spanEmpty(s, level.floor))
+    for (const span of live) {
+      for (const piece of uncoveredBy(span, covers, level.floor)) uncovered.push({ span: piece, floor: level.floor })
+    }
+  }
+
+  const subSets = subParsed.sets.map((s) => renderComparators(s))
+  const domSets = domParsed.sets.map((s) => renderComparators(s))
+
+  if (uncovered.length === 0) {
+    return {
+      ok: true,
+      value: {
+        subset: true,
+        sub,
+        dom,
+        emptySubset,
+        subSets,
+        domSets,
+        witness: null,
+        because: emptySubset
+          ? `"${sub}" accepts no version at all, so every version it accepts is accepted by "${dom}" (an empty range is a subset of every range)`
+          : `every version "${sub}" accepts is also accepted by "${dom}"`,
+      },
+    }
+  }
+
+  const first = uncovered[0] as { span: Span; floor: ParsedVersion }
+  const witness = first.span.start ?? first.floor
+  const witnessText = normalizeVersion(witness)
+  // The witness is the actionable half of the answer, so it must actually be
+  // one: re-check both sides instead of trusting the interval arithmetic.
+  const inSub = satisfiesRange(witness, sub)
+  const inDom = satisfiesRange(witness, dom)
+  if (!inSub.ok || !inSub.satisfied || !inDom.ok || inDom.satisfied) {
+    return {
+      ok: false,
+      reason: `internal inconsistency: the computed witness ${witnessText} does not satisfy "${sub}" alone — refusing to report a witness that cannot be trusted`,
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      subset: false,
+      sub,
+      dom,
+      emptySubset: false,
+      subSets,
+      domSets,
+      witness: witnessText,
+      because: `"${sub}" accepts ${witnessText}, which "${dom}" rejects`,
+    },
+  }
+}
+

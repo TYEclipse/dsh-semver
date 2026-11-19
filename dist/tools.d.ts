@@ -20,7 +20,8 @@ export interface ToolSet {
     semver_coerce: ToolDefinition;
     semver_outside: ToolDefinition;
     semver_explain: ToolDefinition;
+    semver_subset: ToolDefinition;
 }
-/** Build all eleven tool definitions from the resolved config. */
+/** Build all twelve tool definitions from the resolved config. */
 export declare function buildSemverTools(config: ResolvedConfig): ToolSet;
 //# sourceMappingURL=tools.d.ts.map

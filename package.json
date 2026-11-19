@@ -1,7 +1,7 @@
 {
   "name": "dsh-semver",
-  "version": "0.5.0",
-  "description": "Semantic versioning toolbox for DeepSeek Harness (dsh): parse, compare, range-check, increment, diff and sort semver strings (npm semver.inc/diff/sort semantics) — zero runtime dependencies, pure logic",
+  "version": "0.6.0",
+  "description": "Semantic versioning toolbox for DeepSeek Harness (dsh): parse, compare, range-check, increment, diff, sort, range algebra (min version, intersection, subset with witness), coerce and explain semver strings — zero runtime dependencies, pure logic",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,7 +25,9 @@
     "semantic-versioning",
     "version",
     "version-compare",
-    "range"
+    "range",
+    "range-subset",
+    "containment"
   ],
   "license": "MIT",
   "repository": {

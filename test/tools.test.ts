@@ -356,3 +356,39 @@ describe('semver_outside tool', () => {
     assertNoUndefined(badRange)
   })
 })
+
+/**
+ * Every tool must answer in words: the renderer is the only thing a model sees
+ * when it reads a tool result, so a tool whose renderer was never executed is a
+ * tool whose output text is unverified. These assertions are shape-only (the
+ * texts themselves are anchored where the values are), and they also cover the
+ * invalid-input render paths, which must explain rather than throw.
+ */
+describe('output renderers — every tool speaks', () => {
+  const samples: { tool: keyof typeof tools; args: Record<string, unknown>; expect: string }[] = [
+    { tool: 'semver_parse', args: { version: '1.2.3-beta.1+build.9' }, expect: 'major 1, minor 2, patch 3' },
+    { tool: 'semver_parse', args: { version: 'nope' }, expect: 'invalid version' },
+    { tool: 'semver_compare', args: { left: '1.2.3', right: '1.2.4' }, expect: '1.2.3 < 1.2.4' },
+    { tool: 'semver_compare', args: { left: 'x', right: '1.2.4' }, expect: 'cannot compare' },
+    { tool: 'semver_satisfies', args: { version: '1.2.3', range: '^1.2.0' }, expect: 'satisfies' },
+    { tool: 'semver_inc', args: { version: '1.2.3', release: 'minor' }, expect: '→ 1.3.0' },
+    { tool: 'semver_diff', args: { left: '1.2.3', right: '2.0.0' }, expect: 'major' },
+    { tool: 'semver_sort', args: { versions: ['1.9.0', '1.10.0'] }, expect: '1.9.0, 1.10.0' },
+    { tool: 'semver_sort', args: { versions: [] }, expect: 'no valid versions' },
+    { tool: 'semver_min_version', args: { range: '^1.2.3' }, expect: 'lowest version' },
+    { tool: 'semver_intersects', args: { range1: '^1.0.0', range2: '^1.2.0' }, expect: 'can both be satisfied' },
+    { tool: 'semver_coerce', args: { text: 'node v18.16.1' }, expect: '→ 18.16.1' },
+    { tool: 'semver_outside', args: { version: '3.0.0', range: '^1.0.0' }, expect: 'above every version' },
+    { tool: 'semver_explain', args: { version: '1.2.3-beta.1', range: '>=1.0.0' }, expect: 'why:' },
+    { tool: 'semver_subset', args: { sub: '^1.2.0', dom: '^1.0.0' }, expect: 'accepted by' },
+  ]
+
+  it.each(samples)('$tool renders: $expect', async ({ tool, args, expect: needle }) => {
+    const definition = tools[tool]
+    const render = definition.output.render as unknown as (a: unknown, value: unknown) => { type: string; text: string }[]
+    const value = await definition.execute(args as never)
+    const text = render(args, value)[0]?.text ?? ''
+    expect(text).toContain(needle)
+    expect(text.length).toBeGreaterThan(0)
+  })
+})
